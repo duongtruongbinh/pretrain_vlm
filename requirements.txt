@@ -1,0 +1,14 @@
+torch
+transformers>=4.57.6
+accelerate
+tokenizers
+sentencepiece
+safetensors
+Pillow
+tqdm
+PyYAML
+gdown
+datasets
+numpy
+pandas
+streamlit
