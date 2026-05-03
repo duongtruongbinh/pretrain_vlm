@@ -3,7 +3,6 @@ prepare_data:
   output_dir: /home/docs/nhantd/vlm_pretrain/data/uit-openviic
   download:
     enabled: true
-    repo_url: https://github.com/nghiangh/UIT-OpenViIC-dataset
     images:
       file_id: 1eRWL751fGv4WPTg0dhBGMRbcUgh9xKA5
       filename: images.zip
@@ -19,9 +18,13 @@ prepare_data:
         filename: uit-openviic-annotation-test.json
 
 train:
-  train_jsonl: /home/docs/nhantd/vlm_pretrain/data/uit-openviic/train.jsonl
-  eval_jsonl: /home/docs/nhantd/vlm_pretrain/data/uit-openviic/val.jsonl
-  output_dir: /home/docs/nhantd/vlm_pretrain/outputs/run1
+  train_jsonl:
+    - /home/docs/nhantd/vlm_pretrain/data/uit-openviic/train.jsonl
+    - /home/docs/nhantd/LLAVA/data/wit-vi/train.jsonl
+  eval_jsonl:
+    - /home/docs/nhantd/vlm_pretrain/data/uit-openviic/val.jsonl
+    - /home/docs/nhantd/LLAVA/data/wit-vi/val.jsonl
+  output_dir: /home/docs/nhantd/LLAVA/outputs/stage_1_projector
   vision_model: google/siglip2-so400m-patch16-384
   llm_model: meta-llama/Llama-3.2-1B-Instruct
   epochs: 1
@@ -37,15 +40,7 @@ train:
   seed: 42
   resume_from: null
   model_dtype: bfloat16
-
-inference:
-  ckpt: /home/docs/nhantd/vlm_pretrain/outputs/run1/checkpoint-2500.pt
-  vision_model: google/siglip2-so400m-patch16-384
-  llm_model: meta-llama/Llama-3.2-1B-Instruct
-  image: /home/docs/nhantd/vlm_pretrain/data/uit-openviic-raw/images/00000000400.jpg
-  prompt: null
-  max_new_tokens: 64
-  model_dtype: bfloat16
+  projector_dtype: bfloat16
 
 instruction_data:
   dataset_name: 5CD-AI/Viet-ShareGPT-4o-Text-VQA
@@ -76,6 +71,7 @@ instruction_train:
   train_llm: true
   mixed_precision: bf16
   model_dtype: bfloat16
+  projector_dtype: bfloat16
   optimizer_type: adafactor
   adam_foreach: false
   max_text_tokens: 768
@@ -93,15 +89,4 @@ instruction_train:
   keep_last_n: 3
   max_new_tokens: 256
   seed: 42
-  resume_from: /home/docs/nhantd/vlm_pretrain/outputs/instruction_run1/checkpoint-1500
-
-instruction_inference:
-  ckpt_dir: /home/docs/nhantd/vlm_pretrain/outputs/instruction_run1/checkpoint-1500
-  vision_model: google/siglip2-so400m-patch16-384
-  llm_model: meta-llama/Llama-3.2-1B-Instruct
-  model_dtype: bfloat16
-  image: /home/docs/nhantd/vlm_pretrain/data/uit-openviic-raw/images/00000000400.jpg
-  system_prompt: Bạn là một trợ lý thị giác tiếng Việt, trả lời trung thực và chỉ dựa trên nội dung nhìn thấy trong ảnh.
-  question: Nội dung chính của hình ảnh này là gì?
-  max_text_tokens: 768
-  max_new_tokens: 256
+  resume_from: /home/docs/nhantd/vlm_pretrain/outputs/instruction_run1/checkpoint-13500
