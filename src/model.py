@@ -16,6 +16,7 @@ IMAGE_TOKEN = "<image>"
 # vision_feature_select_strategy is set here and propagated to both
 # LlavaConfig and LlavaProcessor so they never drift apart.
 _VISION_FEATURE_SELECT_STRATEGY = "full"
+DEFAULT_PROJECTOR_DTYPE = "float32"
 
 
 def build_processor(vision_model_name: str, llm_model_name: str) -> LlavaProcessor:
@@ -28,8 +29,9 @@ def build_processor(vision_model_name: str, llm_model_name: str) -> LlavaProcess
     one token while the model expects num_patches tokens — causing a runtime
     shape mismatch in _merge_input_ids_with_image_features.
     """
-    siglip_config = AutoConfig.from_pretrained(vision_model_name)
-    patch_size = siglip_config.vision_config.patch_size  # 16 for siglip2-so400m-patch16-384
+    vision_root_config = AutoConfig.from_pretrained(vision_model_name)
+    vision_config = getattr(vision_root_config, "vision_config", vision_root_config)
+    patch_size = vision_config.patch_size  # 16 for siglip2-so400m-patch16-384
 
     image_processor = AutoImageProcessor.from_pretrained(vision_model_name)
     tokenizer = AutoTokenizer.from_pretrained(llm_model_name, use_fast=True)
@@ -49,7 +51,9 @@ def build_processor(vision_model_name: str, llm_model_name: str) -> LlavaProcess
 def build_model(
     vision_model_name: str,
     llm_model_name: str,
+    tokenizer_name_or_path: str | None = None,
     model_dtype: str | None = None,
+    projector_dtype: str | None = DEFAULT_PROJECTOR_DTYPE,
     projector_state: dict | None = None,
 ) -> LlavaForConditionalGeneration:
     """
@@ -62,14 +66,17 @@ def build_model(
     llm_model_name so the processor's patch_size matches the model's vision config.
     """
     torch_dtype = _resolve_dtype(model_dtype)
+    projector_torch_dtype = _resolve_dtype(projector_dtype) or torch.float32
 
     # Use build_processor to resolve patch_size and token IDs consistently.
-    processor = build_processor(vision_model_name, llm_model_name)
+    processor = build_processor(
+        vision_model_name, tokenizer_name_or_path or llm_model_name
+    )
     tokenizer = processor.tokenizer
     image_token_index = tokenizer.convert_tokens_to_ids(IMAGE_TOKEN)
 
-    siglip_config = AutoConfig.from_pretrained(vision_model_name)
-    vision_config = siglip_config.vision_config
+    vision_root_config = AutoConfig.from_pretrained(vision_model_name)
+    vision_config = getattr(vision_root_config, "vision_config", vision_root_config)
     text_config = AutoConfig.from_pretrained(llm_model_name)
 
     llava_config = LlavaConfig(
@@ -82,17 +89,20 @@ def build_model(
     )
 
     model = LlavaForConditionalGeneration(llava_config)
-    # Resize to accommodate the added <image> token.
-    model.resize_token_embeddings(len(tokenizer))
 
     _load_vision_weights(model, vision_model_name, torch_dtype)
     _load_llm_weights(model, llm_model_name, torch_dtype)
 
+    # Resize after loading the pretrained LLM so existing token embeddings and
+    # lm_head rows are preserved. The new <image> token is only a placeholder
+    # that HF LLaVA replaces with projected image features during forward.
+    if len(tokenizer) != model.get_input_embeddings().num_embeddings:
+        model.resize_token_embeddings(len(tokenizer))
+
     if projector_state is not None:
         model.multi_modal_projector.load_state_dict(projector_state)
 
-    if torch_dtype is not None:
-        model = model.to(torch_dtype)
+    _cast_runtime_dtypes(model, torch_dtype, projector_torch_dtype)
 
     return model
 
@@ -106,31 +116,61 @@ def freeze_components(
     model.vision_tower.requires_grad_(not freeze_vision)
     model.multi_modal_projector.requires_grad_(train_projector)
     model.language_model.requires_grad_(train_llm)
+    model.lm_head.requires_grad_(train_llm)
 
-    if freeze_vision:
-        model.vision_tower.eval()
-    if not train_projector:
-        model.multi_modal_projector.eval()
-    if not train_llm:
-        model.language_model.eval()
+    set_component_modes(model, freeze_vision, train_projector, train_llm)
+
+
+def set_component_modes(
+    model: LlavaForConditionalGeneration,
+    freeze_vision: bool,
+    train_projector: bool,
+    train_llm: bool,
+) -> None:
+    model.vision_tower.train(not freeze_vision)
+    model.multi_modal_projector.train(train_projector)
+    model.language_model.train(train_llm)
+    model.lm_head.train(train_llm)
 
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+
 def _resolve_dtype(dtype_name: str | None) -> torch.dtype | None:
-    if not dtype_name or str(dtype_name).strip().lower() in {"", "auto", "none", "null"}:
+    if not dtype_name or str(dtype_name).strip().lower() in {
+        "",
+        "auto",
+        "none",
+        "null",
+    }:
         return None
     mapping = {
-        "float32": torch.float32, "fp32": torch.float32,
-        "float16": torch.float16, "fp16": torch.float16, "half": torch.float16,
-        "bfloat16": torch.bfloat16, "bf16": torch.bfloat16,
+        "float32": torch.float32,
+        "fp32": torch.float32,
+        "float16": torch.float16,
+        "fp16": torch.float16,
+        "half": torch.float16,
+        "bfloat16": torch.bfloat16,
+        "bf16": torch.bfloat16,
     }
     key = str(dtype_name).strip().lower()
     if key not in mapping:
         raise ValueError(f"Unsupported model_dtype '{dtype_name}'.")
     return mapping[key]
+
+
+def _cast_runtime_dtypes(
+    model: LlavaForConditionalGeneration,
+    model_dtype: torch.dtype | None,
+    projector_dtype: torch.dtype,
+) -> None:
+    if model_dtype is not None:
+        model.vision_tower.to(model_dtype)
+        model.language_model.to(model_dtype)
+        model.lm_head.to(model_dtype)
+    model.multi_modal_projector.to(projector_dtype)
 
 
 def _load_vision_weights(
@@ -153,5 +193,10 @@ def _load_llm_weights(
     llm = AutoModelForCausalLM.from_pretrained(
         llm_model_name, torch_dtype=torch_dtype, low_cpu_mem_usage=True
     )
-    model.language_model.load_state_dict(llm.state_dict(), strict=False)
+    # LlavaForConditionalGeneration.language_model is the bare LlamaModel.
+    # AutoModelForCausalLM.state_dict() keys are prefixed with "model.", so
+    # loading that dict directly into language_model silently leaves the LLM
+    # randomly initialized when strict=False.
+    model.language_model.load_state_dict(llm.model.state_dict(), strict=True)
+    model.lm_head.load_state_dict(llm.lm_head.state_dict(), strict=True)
     del llm
