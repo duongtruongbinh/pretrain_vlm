@@ -26,7 +26,9 @@ def _remap_projector_state(state_dict: dict) -> dict:
     return {mapping.get(k, k): v for k, v in state_dict.items()}
 
 
-def save_projector_ckpt(model, optimizer, scheduler, step: int, path: str | Path) -> None:
+def save_projector_ckpt(
+    model, optimizer, scheduler, step: int, path: str | Path
+) -> None:
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
@@ -51,10 +53,16 @@ def load_projector_ckpt(path: str | Path, model, optimizer=None, scheduler=None)
     return int(ckpt["step"])
 
 
-def save_full_ckpt(model, tokenizer, optimizer, scheduler, step: int, path: str | Path) -> None:
+def save_full_ckpt(
+    model, tokenizer, optimizer, scheduler, step: int, path: str | Path
+) -> None:
     d = Path(path)
     d.mkdir(parents=True, exist_ok=True)
-    torch.save({"projector_state_dict": model.multi_modal_projector.state_dict()}, d / "projector.pt")
+    torch.save(
+        {"projector_state_dict": model.multi_modal_projector.state_dict()},
+        d / "projector.pt",
+    )
+    torch.save(model.lm_head.state_dict(), d / "lm_head.pt")
     torch.save(optimizer.state_dict(), d / "optimizer.pt")
     torch.save(scheduler.state_dict(), d / "scheduler.pt")
     model.language_model.save_pretrained(d / "llm", safe_serialization=True)
@@ -69,6 +77,9 @@ def load_full_ckpt(path: str | Path, model, optimizer=None, scheduler=None) -> i
     raw_state = raw["projector_state_dict"] if "projector_state_dict" in raw else raw
     state = _remap_projector_state(raw_state)
     model.multi_modal_projector.load_state_dict(state)
+    lm_head_path = d / "lm_head.pt"
+    if lm_head_path.exists():
+        model.lm_head.load_state_dict(torch.load(lm_head_path, map_location="cpu"))
     if optimizer is not None and (d / "optimizer.pt").exists():
         optimizer.load_state_dict(torch.load(d / "optimizer.pt", map_location="cpu"))
     if scheduler is not None and (d / "scheduler.pt").exists():
@@ -84,11 +95,12 @@ def rotate_checkpoints(output_dir: str | Path, keep_last_n: int) -> None:
     d = Path(output_dir)
     checkpoints = []
     for p in d.glob("checkpoint-*"):
-        step_str = p.name.replace("checkpoint-", "").rstrip(".pt")
+        step_str = p.name.replace("checkpoint-", "", 1).removesuffix(".pt")
         if step_str.isdigit():
             checkpoints.append((int(step_str), p))
     checkpoints.sort(key=lambda x: x[0])
-    for _, p in (checkpoints[:-keep_last_n] if keep_last_n > 0 else checkpoints):
+    to_delete = checkpoints[:-keep_last_n] if keep_last_n > 0 else checkpoints
+    for _, p in to_delete:
         if p.is_dir():
             shutil.rmtree(p, ignore_errors=True)
         else:
