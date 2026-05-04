@@ -1,6 +1,6 @@
 prepare_data:
-  raw_dir: /home/docs/nhantd/vlm_pretrain/data/uit-openviic-raw
-  output_dir: /home/docs/nhantd/vlm_pretrain/data/uit-openviic
+  raw_dir: /home/docs/nhantd/LLAVA/data/uit-openviic-raw
+  output_dir: /home/docs/nhantd/LLAVA/data/uit-openviic
   download:
     enabled: true
     images:
@@ -34,12 +34,12 @@ prepare_coco:
 
 train:
   train_jsonl:
-    - /home/docs/nhantd/LLAVA/data/wit-vi/train.jsonl
     - /home/docs/nhantd/LLAVA/data/coco2017/train.jsonl
+    - /home/docs/nhantd/LLAVA/data/uit-openviic/train.jsonl
   eval_jsonl:
-    - /home/docs/nhantd/LLAVA/data/wit-vi/val.jsonl
     - /home/docs/nhantd/LLAVA/data/coco2017/val.jsonl
-  output_dir: /home/docs/nhantd/LLAVA/outputs/stage_1_projector_wit_coco
+    - /home/docs/nhantd/LLAVA/data/uit-openviic/val.jsonl
+  output_dir: /home/docs/nhantd/LLAVA/outputs/stage_1_projector_coco_uit
   vision_model: google/siglip2-so400m-patch16-384
   llm_model: meta-llama/Llama-3.2-1B-Instruct
   epochs: 1
