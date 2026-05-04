@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import math
 from pathlib import Path
 
@@ -10,12 +9,18 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from transformers import Adafactor, get_cosine_schedule_with_warmup
 
-from src.checkpoint import load_full_ckpt, load_projector_ckpt, rotate_checkpoints, save_full_ckpt
+from src.checkpoint import (
+    load_full_ckpt,
+    load_projector_ckpt,
+    rotate_checkpoints,
+    save_full_ckpt,
+)
 from src.config import load_config
 from src.instruction_collator import InstructionCollator
 from src.instruction_dataset import ImageInstructionDataset
-from src.model import build_model, freeze_components
-from src.trainer import EpochShuffleSampler, evaluate_loss, log_message
+from src.model import build_model, freeze_components, set_component_modes
+from src.paths import resolve_config_path
+from src.trainer import EpochShuffleSampler, append_jsonl, evaluate_loss, log_message
 from src.utils import set_seed
 
 
@@ -28,24 +33,41 @@ def _build_optimizer(model, cfg: dict):
     projector_lr = float(cfg["projector_lr"])
     llm_lr = float(cfg["llm_lr"])
     wd = float(cfg["weight_decay"])
-    groups: dict[str, list] = {k: [] for k in ("proj_decay", "proj_nodecay", "llm_decay", "llm_nodecay")}
+    groups: dict[str, list] = {
+        k: [] for k in ("proj_decay", "proj_nodecay", "llm_decay", "llm_nodecay")
+    }
+    seen_params: set[int] = set()
 
-    for name, p in model.multi_modal_projector.named_parameters():
-        if p.requires_grad:
-            groups["proj_nodecay" if _is_no_decay(name, p) else "proj_decay"].append(p)
-    for name, p in model.language_model.named_parameters():
-        if p.requires_grad:
-            groups["llm_nodecay" if _is_no_decay(name, p) else "llm_decay"].append(p)
+    def add_params(named_params, decay_key: str, nodecay_key: str) -> None:
+        for name, p in named_params:
+            if not p.requires_grad or id(p) in seen_params:
+                continue
+            seen_params.add(id(p))
+            groups[nodecay_key if _is_no_decay(name, p) else decay_key].append(p)
+
+    add_params(
+        model.multi_modal_projector.named_parameters(), "proj_decay", "proj_nodecay"
+    )
+    add_params(model.language_model.named_parameters(), "llm_decay", "llm_nodecay")
+    add_params(model.lm_head.named_parameters(), "llm_decay", "llm_nodecay")
 
     param_groups = []
     if groups["proj_decay"]:
-        param_groups.append({"params": groups["proj_decay"], "lr": projector_lr, "weight_decay": wd})
+        param_groups.append(
+            {"params": groups["proj_decay"], "lr": projector_lr, "weight_decay": wd}
+        )
     if groups["proj_nodecay"]:
-        param_groups.append({"params": groups["proj_nodecay"], "lr": projector_lr, "weight_decay": 0.0})
+        param_groups.append(
+            {"params": groups["proj_nodecay"], "lr": projector_lr, "weight_decay": 0.0}
+        )
     if groups["llm_decay"]:
-        param_groups.append({"params": groups["llm_decay"], "lr": llm_lr, "weight_decay": wd})
+        param_groups.append(
+            {"params": groups["llm_decay"], "lr": llm_lr, "weight_decay": wd}
+        )
     if groups["llm_nodecay"]:
-        param_groups.append({"params": groups["llm_nodecay"], "lr": llm_lr, "weight_decay": 0.0})
+        param_groups.append(
+            {"params": groups["llm_nodecay"], "lr": llm_lr, "weight_decay": 0.0}
+        )
 
     if not param_groups:
         raise RuntimeError("No trainable parameters found.")
@@ -54,7 +76,9 @@ def _build_optimizer(model, cfg: dict):
     if opt_type == "adamw":
         return AdamW(param_groups, foreach=bool(cfg.get("adam_foreach", False)))
     if opt_type == "adafactor":
-        return Adafactor(param_groups, scale_parameter=False, relative_step=False, warmup_init=False)
+        return Adafactor(
+            param_groups, scale_parameter=False, relative_step=False, warmup_init=False
+        )
     raise ValueError(f"Unsupported optimizer_type '{opt_type}'.")
 
 
@@ -77,6 +101,23 @@ def _select_eval_samples(records, max_samples: int = 5):
     return selected
 
 
+def _resolve_resume_sources(
+    resume_dir: Path | None, base_llm_model: str
+) -> tuple[str, str]:
+    if resume_dir is None:
+        return base_llm_model, base_llm_model
+
+    llm_dir = resume_dir / "llm"
+    tokenizer_dir = resume_dir / "tokenizer"
+    if not llm_dir.exists():
+        raise FileNotFoundError(f"Missing resumed LLM weights under {llm_dir}")
+
+    tokenizer_source = (
+        str(tokenizer_dir.resolve()) if tokenizer_dir.exists() else base_llm_model
+    )
+    return str(llm_dir.resolve()), tokenizer_source
+
+
 def _log_eval_samples(model, collator, eval_samples, accelerator, max_new_tokens):
     unwrapped = accelerator.unwrap_model(model)
     tokenizer = collator.tokenizer
@@ -94,26 +135,38 @@ def _log_eval_samples(model, collator, eval_samples, accelerator, max_new_tokens
         prompt_ids, attn_mask = collator.build_prompt_tensors(
             sample["messages"][:-1], device=accelerator.device
         )
-        pixel_values = collator.image_processor(
-            images=img, return_tensors="pt"
-        )["pixel_values"].to(accelerator.device)
+        pixel_values = collator.image_processor(images=img, return_tensors="pt")[
+            "pixel_values"
+        ].to(accelerator.device)
 
-        with torch.no_grad():
+        eos_ids = sorted(
+            {tokenizer.eos_token_id, tokenizer.convert_tokens_to_ids("<|end_of_text|>")}
+        )
+        with torch.no_grad(), accelerator.autocast():
             generated_ids = unwrapped.generate(
                 input_ids=prompt_ids,
                 pixel_values=pixel_values,
                 attention_mask=attn_mask,
                 max_new_tokens=max_new_tokens,
-                eos_token_id=tokenizer.eos_token_id,
+                min_new_tokens=5,
+                eos_token_id=eos_ids,
                 pad_token_id=tokenizer.pad_token_id,
                 do_sample=False,
             )
 
-        prediction = tokenizer.decode(generated_ids[0], skip_special_tokens=True).strip() or "<empty>"
+        input_len = prompt_ids.shape[1]
+        generated_text = tokenizer.decode(
+            generated_ids[0, input_len:], skip_special_tokens=True
+        ).strip()
+        raw_generated_text = tokenizer.decode(
+            generated_ids[0, input_len:], skip_special_tokens=False
+        ).strip()
+        prediction = generated_text or "<empty>"
         for line in [
             f"[sample {idx}] sample_type: {sample.get('sample_type', 'unknown')}",
             f"[sample {idx}] user: {_latest_user_message(sample['messages'][:-1])}",
             f"[sample {idx}] prediction: {prediction}",
+            f"[sample {idx}] prediction_raw: {raw_generated_text or '<empty>'}",
             f"[sample {idx}] reference: {sample['messages'][-1]['content']}",
         ]:
             accelerator.print(line)
@@ -121,18 +174,32 @@ def _log_eval_samples(model, collator, eval_samples, accelerator, max_new_tokens
     return lines
 
 
-def evaluate(model, eval_loader, accelerator, eval_samples, collator, max_new_tokens, global_step, log_path):
+def evaluate(
+    model,
+    eval_loader,
+    accelerator,
+    eval_samples,
+    collator,
+    max_new_tokens,
+    global_step,
+    log_path,
+    component_modes,
+):
     accelerator.unwrap_model(model).eval()
     eval_loss = evaluate_loss(model, eval_loader, accelerator)
-    log_message(f"[check] step {global_step}: eval_loss={eval_loss:.6f}", accelerator, log_path)
+    log_message(
+        f"[check] step {global_step}: eval_loss={eval_loss:.6f}", accelerator, log_path
+    )
 
-    lines = _log_eval_samples(model, collator, eval_samples, accelerator, max_new_tokens)
+    lines = _log_eval_samples(
+        model, collator, eval_samples, accelerator, max_new_tokens
+    )
     if accelerator.is_main_process:
         with log_path.open("a", encoding="utf-8") as fh:
             for line in lines:
                 fh.write(line + "\n")
 
-    accelerator.unwrap_model(model).train()
+    set_component_modes(accelerator.unwrap_model(model), **component_modes)
     return eval_loss
 
 
@@ -141,47 +208,75 @@ def main() -> None:
     output_dir = Path(cfg["output_dir"]).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     log_path = output_dir / "train_instruction.log"
+    metrics_path = output_dir / "metrics.jsonl"
 
-    resume_dir = Path(cfg["resume_from"]).expanduser().resolve() if cfg.get("resume_from") else None
+    resume_dir = (
+        Path(cfg["resume_from"]).expanduser().resolve()
+        if cfg.get("resume_from")
+        else None
+    )
     stage1_ckpt = Path(cfg["stage1_projector_ckpt"]).expanduser().resolve()
 
     mixed_precision = str(cfg.get("mixed_precision", "bf16")).strip().lower()
-    if mixed_precision == "bf16" and torch.cuda.is_available() and not torch.cuda.is_bf16_supported():
-        raise RuntimeError("bf16 not supported on this device. Set mixed_precision to fp16.")
+    if (
+        mixed_precision == "bf16"
+        and torch.cuda.is_available()
+        and not torch.cuda.is_bf16_supported()
+    ):
+        raise RuntimeError(
+            "bf16 not supported on this device. Set mixed_precision to fp16."
+        )
 
     accelerator = Accelerator(
-        gradient_accumulation_steps=int(cfg["grad_accum"]), mixed_precision=mixed_precision
+        gradient_accumulation_steps=int(cfg["grad_accum"]),
+        mixed_precision=mixed_precision,
     )
     set_seed(int(cfg["seed"]))
 
+    llm_source, tokenizer_source = _resolve_resume_sources(resume_dir, cfg["llm_model"])
     collator = InstructionCollator(
-        cfg["vision_model"], cfg["llm_model"], max_text_tokens=int(cfg["max_text_tokens"])
+        cfg["vision_model"],
+        tokenizer_source,
+        max_text_tokens=int(cfg["max_text_tokens"]),
     )
-    train_dataset = ImageInstructionDataset(str(Path(cfg["train_jsonl"]).expanduser().resolve()))
-    eval_dataset = ImageInstructionDataset(str(Path(cfg["eval_jsonl"]).expanduser().resolve()))
+    train_dataset = ImageInstructionDataset(resolve_config_path(cfg["train_jsonl"]))
+    eval_dataset = ImageInstructionDataset(resolve_config_path(cfg["eval_jsonl"]))
     eval_samples = _select_eval_samples(eval_dataset.records)
     train_sampler = EpochShuffleSampler(train_dataset, seed=int(cfg["seed"]))
 
     train_loader = DataLoader(
-        train_dataset, batch_size=int(cfg["batch_size"]), sampler=train_sampler,
-        collate_fn=collator, pin_memory=torch.cuda.is_available(),
+        train_dataset,
+        batch_size=int(cfg["batch_size"]),
+        sampler=train_sampler,
+        collate_fn=collator,
+        pin_memory=torch.cuda.is_available(),
     )
     eval_loader = DataLoader(
-        eval_dataset, batch_size=int(cfg["batch_size"]), shuffle=False,
-        collate_fn=collator, pin_memory=torch.cuda.is_available(),
+        eval_dataset,
+        batch_size=int(cfg["batch_size"]),
+        shuffle=False,
+        collate_fn=collator,
+        pin_memory=torch.cuda.is_available(),
     )
 
-    llm_source = str((resume_dir / "llm").resolve()) if resume_dir else cfg["llm_model"]
-    if resume_dir and not (resume_dir / "llm").exists():
-        raise FileNotFoundError(f"Missing resumed LLM weights under {resume_dir / 'llm'}")
-
-    model = build_model(cfg["vision_model"], llm_source, model_dtype=cfg.get("model_dtype"))
+    model = build_model(
+        cfg["vision_model"],
+        llm_source,
+        tokenizer_name_or_path=tokenizer_source,
+        model_dtype=cfg.get("model_dtype"),
+        projector_dtype=cfg.get("projector_dtype", "float32"),
+    )
     freeze_components(
         model,
         freeze_vision=bool(cfg.get("freeze_vision", True)),
         train_projector=bool(cfg.get("train_projector", True)),
         train_llm=bool(cfg.get("train_llm", True)),
     )
+    component_modes = {
+        "freeze_vision": bool(cfg.get("freeze_vision", True)),
+        "train_projector": bool(cfg.get("train_projector", True)),
+        "train_llm": bool(cfg.get("train_llm", True)),
+    }
 
     if bool(cfg.get("gradient_checkpointing", False)):
         model.language_model.config.use_cache = False
@@ -207,23 +302,41 @@ def main() -> None:
 
     global_step = 0
     if resume_dir:
-        global_step = load_full_ckpt(str(resume_dir), accelerator.unwrap_model(model), optimizer, scheduler)
+        global_step = load_full_ckpt(
+            str(resume_dir), accelerator.unwrap_model(model), optimizer, scheduler
+        )
 
-    log_message(f"[check] train={len(train_dataset)} eval={len(eval_dataset)}", accelerator, log_path)
+    log_message(
+        f"[check] train={len(train_dataset)} eval={len(eval_dataset)}",
+        accelerator,
+        log_path,
+    )
     if stage1_step is not None:
-        log_message(f"[check] warm-started projector from stage-1 step {stage1_step}", accelerator, log_path)
+        log_message(
+            f"[check] warm-started projector from stage-1 step {stage1_step}",
+            accelerator,
+            log_path,
+        )
     if resume_dir:
-        log_message(f"[check] resumed from {resume_dir} at step {global_step}", accelerator, log_path)
+        log_message(
+            f"[check] resumed from {resume_dir} at step {global_step}",
+            accelerator,
+            log_path,
+        )
 
     optimizer.zero_grad(set_to_none=True)
-    accelerator.unwrap_model(model).train()
+    set_component_modes(accelerator.unwrap_model(model), **component_modes)
 
     starting_epoch = global_step // steps_per_epoch if steps_per_epoch > 0 else 0
-    batches_to_skip = (global_step % steps_per_epoch) * int(cfg["grad_accum"]) if steps_per_epoch > 0 else 0
+    batches_to_skip = (
+        (global_step % steps_per_epoch) * int(cfg["grad_accum"])
+        if steps_per_epoch > 0
+        else 0
+    )
 
     for epoch in range(starting_epoch, int(cfg["epochs"])):
         train_sampler.set_epoch(epoch)
-        accelerator.unwrap_model(model).train()
+        set_component_modes(accelerator.unwrap_model(model), **component_modes)
 
         for batch_idx, batch in enumerate(train_loader):
             if epoch == starting_epoch and batch_idx < batches_to_skip:
@@ -236,38 +349,92 @@ def main() -> None:
                 accelerator.backward(loss)
 
                 if accelerator.sync_gradients:
-                    trainable_params = [p for p in accelerator.unwrap_model(model).parameters() if p.requires_grad]
+                    trainable_params = [
+                        p
+                        for p in accelerator.unwrap_model(model).parameters()
+                        if p.requires_grad
+                    ]
                     accelerator.clip_grad_norm_(trainable_params, 1.0)
 
                 optimizer.step()
-                scheduler.step()
+                if accelerator.sync_gradients:
+                    scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
 
             if not accelerator.sync_gradients:
                 continue
 
             global_step += 1
-            mean_loss = accelerator.gather_for_metrics(loss.detach().float().view(1)).mean().item()
+            mean_loss = (
+                accelerator.gather_for_metrics(loss.detach().float().view(1))
+                .mean()
+                .item()
+            )
 
             if global_step % int(cfg["log_steps"]) == 0:
-                log_message(f"step {global_step}: train_loss={mean_loss:.6f}", accelerator, log_path)
+                log_message(
+                    f"step {global_step}: train_loss={mean_loss:.6f}",
+                    accelerator,
+                    log_path,
+                )
+                if accelerator.is_main_process:
+                    append_jsonl(
+                        metrics_path, {"step": global_step, "train_loss": mean_loss}
+                    )
 
             if global_step % int(cfg["eval_steps"]) == 0:
-                evaluate(
-                    model, eval_loader, accelerator, eval_samples, collator,
-                    int(cfg["max_new_tokens"]), global_step, log_path,
+                eval_loss = evaluate(
+                    model,
+                    eval_loader,
+                    accelerator,
+                    eval_samples,
+                    collator,
+                    int(cfg["max_new_tokens"]),
+                    global_step,
+                    log_path,
+                    component_modes,
                 )
+                if accelerator.is_main_process:
+                    append_jsonl(
+                        metrics_path, {"step": global_step, "eval_loss": eval_loss}
+                    )
 
-            if global_step % int(cfg["save_steps"]) == 0 and accelerator.is_main_process:
+            if (
+                global_step % int(cfg["save_steps"]) == 0
+                and accelerator.is_main_process
+            ):
                 ckpt_path = output_dir / f"checkpoint-{global_step}"
                 save_full_ckpt(
-                    accelerator.unwrap_model(model), collator.tokenizer,
-                    optimizer, scheduler, global_step, ckpt_path,
+                    accelerator.unwrap_model(model),
+                    collator.tokenizer,
+                    optimizer,
+                    scheduler,
+                    global_step,
+                    ckpt_path,
                 )
                 rotate_checkpoints(str(output_dir), int(cfg["keep_last_n"]))
-                log_message(f"[check] saved checkpoint to {ckpt_path}", accelerator, log_path)
+                log_message(
+                    f"[check] saved checkpoint to {ckpt_path}", accelerator, log_path
+                )
 
         batches_to_skip = 0
+
+    if accelerator.is_main_process:
+        ckpt_path = output_dir / f"checkpoint-{global_step}"
+        save_full_ckpt(
+            accelerator.unwrap_model(model),
+            collator.tokenizer,
+            optimizer,
+            scheduler,
+            global_step,
+            ckpt_path,
+        )
+        rotate_checkpoints(str(output_dir), int(cfg["keep_last_n"]))
+        log_message(
+            f"[check] saved final instruction checkpoint to {ckpt_path}",
+            accelerator,
+            log_path,
+        )
 
     log_message("Instruction finetuning finished.", accelerator, log_path)
 

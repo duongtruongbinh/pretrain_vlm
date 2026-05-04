@@ -5,10 +5,7 @@ tokenizers
 sentencepiece
 safetensors
 Pillow
-tqdm
 PyYAML
 gdown
 datasets
-numpy
-pandas
-streamlit
+huggingface_hub

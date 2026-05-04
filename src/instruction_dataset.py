@@ -7,29 +7,39 @@ from pathlib import Path
 from PIL import Image
 from torch.utils.data import Dataset
 
+from src.paths import resolve_record_image_path
+
 
 def _validate_messages(messages, *, sample_id: str) -> None:
     if not isinstance(messages, list) or not messages:
-        raise ValueError(f"Sample '{sample_id}' must contain a non-empty 'messages' list.")
+        raise ValueError(
+            f"Sample '{sample_id}' must contain a non-empty 'messages' list."
+        )
 
     for message_index, message in enumerate(messages):
         if not isinstance(message, dict):
-            raise ValueError(f"Sample '{sample_id}' message #{message_index} must be a mapping.")
+            raise ValueError(
+                f"Sample '{sample_id}' message #{message_index} must be a mapping."
+            )
 
         role = str(message.get("role", "")).strip()
         content = str(message.get("content", "")).strip()
         if role not in {"system", "user", "assistant"}:
-            raise ValueError(f"Sample '{sample_id}' message #{message_index} has unsupported role '{role}'.")
+            raise ValueError(
+                f"Sample '{sample_id}' message #{message_index} has unsupported role '{role}'."
+            )
         if not content:
-            raise ValueError(f"Sample '{sample_id}' message #{message_index} has empty content.")
+            raise ValueError(
+                f"Sample '{sample_id}' message #{message_index} has empty content."
+            )
 
     if messages[-1]["role"] != "assistant":
         raise ValueError(f"Sample '{sample_id}' must end with an assistant message.")
 
 
 class ImageInstructionDataset(Dataset):
-    def __init__(self, jsonl_path: str):
-        self.jsonl_path = Path(jsonl_path)
+    def __init__(self, jsonl_path: str | Path):
+        self.jsonl_path = Path(jsonl_path).expanduser().resolve()
         self.records = []
         self.bad_indices = set()
 
@@ -45,8 +55,13 @@ class ImageInstructionDataset(Dataset):
                 messages = record.get("messages")
 
                 if not image_path:
-                    raise ValueError(f"Sample '{sample_id}' on line {line_number} is missing 'image'.")
+                    raise ValueError(
+                        f"Sample '{sample_id}' on line {line_number} is missing 'image'."
+                    )
                 _validate_messages(messages, sample_id=sample_id)
+                image_path = resolve_record_image_path(
+                    image_path, jsonl_path=self.jsonl_path
+                )
 
                 self.records.append(
                     {
@@ -79,7 +94,9 @@ class ImageInstructionDataset(Dataset):
                 with Image.open(image_path) as image:
                     image = image.convert("RGB")
             except Exception as error:
-                warnings.warn(f"Skipping corrupt instruction image at {image_path}: {error}")
+                warnings.warn(
+                    f"Skipping corrupt instruction image at {image_path}: {error}"
+                )
                 self.bad_indices.add(current_index)
                 continue
 
@@ -93,4 +110,6 @@ class ImageInstructionDataset(Dataset):
                 "source_dataset": record["source_dataset"],
             }
 
-        raise RuntimeError(f"All images in {self.jsonl_path} are invalid or unreadable.")
+        raise RuntimeError(
+            f"All images in {self.jsonl_path} are invalid or unreadable."
+        )

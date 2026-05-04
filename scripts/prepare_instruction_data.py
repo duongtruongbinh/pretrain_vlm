@@ -181,7 +181,8 @@ def save_image_asset(image_value, destination: Path) -> None:
         raise TypeError(f"Unsupported image value type: {type(image_value)!r}")
 
     with Image.open(destination) as image:
-        image.convert("RGB")
+        if image.mode != "RGB":
+            image.convert("RGB").save(destination)
 
 
 def build_description_sample(*, sample_id: str, image_path: Path, image_key: str, system_prompt: str, user_prompt: str, assistant_text: str, source_dataset: str) -> dict:
