@@ -15,7 +15,7 @@ from src.config import load_config
 from src.dataset import ImageCaptionDataset
 from src.model import build_model, freeze_components
 from src.paths import resolve_config_paths
-from src.trainer import EpochShuffleSampler, append_jsonl, evaluate_loss, log_message
+from src.trainer import append_jsonl, build_weighted_sampler, evaluate_loss, log_message
 from src.utils import set_seed
 
 
@@ -144,7 +144,7 @@ def main() -> None:
     train_dataset = ImageCaptionDataset(resolve_config_paths(cfg["train_jsonl"]))
     eval_dataset = ImageCaptionDataset(resolve_config_paths(cfg["eval_jsonl"]))
     eval_samples = _select_eval_samples(eval_dataset.records, sample_count=5)
-    train_sampler = EpochShuffleSampler(train_dataset, seed=int(cfg["seed"]))
+    train_sampler = build_weighted_sampler(train_dataset, seed=int(cfg["seed"]))
 
     train_loader = DataLoader(
         train_dataset,
@@ -231,7 +231,6 @@ def main() -> None:
     optimizer.zero_grad(set_to_none=True)
 
     for epoch in range(starting_epoch, int(cfg["epochs"])):
-        train_sampler.set_epoch(epoch)
         accelerator.unwrap_model(model).multi_modal_projector.train()
 
         for batch_idx, batch in enumerate(train_loader):

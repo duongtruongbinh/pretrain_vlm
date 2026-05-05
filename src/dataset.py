@@ -17,7 +17,9 @@ class ImageCaptionDataset(Dataset):
         self.records = []
         self.bad_indices = set()
 
-        for p in self.jsonl_paths:
+        self.source_indices: list[int] = []
+
+        for source_idx, p in enumerate(self.jsonl_paths):
             with p.open("r", encoding="utf-8") as handle:
                 for line_number, line in enumerate(handle, start=1):
                     line = line.strip()
@@ -34,6 +36,7 @@ class ImageCaptionDataset(Dataset):
                         record["image"], jsonl_path=p
                     )
                     self.records.append(record)
+                    self.source_indices.append(source_idx)
 
     def __len__(self) -> int:
         return len(self.records)
