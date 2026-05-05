@@ -5,7 +5,7 @@ from pathlib import Path
 
 import torch
 from accelerate import Accelerator
-from torch.utils.data import Sampler, WeightedRandomSampler
+from torch.utils.data import Sampler
 
 
 class EpochShuffleSampler(Sampler[int]):
@@ -26,7 +26,34 @@ class EpochShuffleSampler(Sampler[int]):
         return len(self.dataset)
 
 
-def build_weighted_sampler(dataset, seed: int) -> WeightedRandomSampler:
+class EpochAwareWeightedSampler(Sampler[int]):
+    """Weighted sampler with replacement that reseeds per epoch via set_epoch."""
+
+    def __init__(self, weights, num_samples: int, seed: int):
+        self.weights = torch.as_tensor(weights, dtype=torch.float64)
+        self.num_samples = num_samples
+        self.seed = seed
+        self.epoch = 0
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = epoch
+
+    def __iter__(self):
+        generator = torch.Generator()
+        generator.manual_seed(self.seed + self.epoch)
+        indices = torch.multinomial(
+            self.weights,
+            self.num_samples,
+            replacement=True,
+            generator=generator,
+        )
+        return iter(indices.tolist())
+
+    def __len__(self) -> int:
+        return self.num_samples
+
+
+def build_weighted_sampler(dataset, seed: int) -> EpochAwareWeightedSampler:
     """Equal-contribution sampler: each source jsonl contributes 1/n_sources of samples."""
     n_sources = len(dataset.jsonl_paths)
     counts = [0] * n_sources
@@ -36,14 +63,10 @@ def build_weighted_sampler(dataset, seed: int) -> WeightedRandomSampler:
     source_weight = [1.0 / c if c > 0 else 0.0 for c in counts]
     weights = [source_weight[src_idx] for src_idx in dataset.source_indices]
 
-    generator = torch.Generator()
-    generator.manual_seed(seed)
-
-    return WeightedRandomSampler(
+    return EpochAwareWeightedSampler(
         weights=weights,
         num_samples=len(dataset),
-        replacement=True,
-        generator=generator,
+        seed=seed,
     )
 
 
