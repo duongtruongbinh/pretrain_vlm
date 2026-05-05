@@ -326,6 +326,8 @@ def main() -> None:
 
     optimizer.zero_grad(set_to_none=True)
     set_component_modes(accelerator.unwrap_model(model), **component_modes)
+    running_token_count = torch.zeros(1, dtype=torch.long, device=accelerator.device)
+    running_sum_loss = torch.zeros(1, dtype=torch.float32, device=accelerator.device)
 
     starting_epoch = global_step // steps_per_epoch if steps_per_epoch > 0 else 0
     batches_to_skip = (
@@ -345,16 +347,30 @@ def main() -> None:
             with accelerator.accumulate(model):
                 with accelerator.autocast():
                     outputs = model(**batch)
-                loss = outputs.loss
+                n_tokens = (batch["labels"] != -100).sum()
+                loss = outputs.loss * n_tokens.float()
                 accelerator.backward(loss)
+                running_token_count += n_tokens
+                running_sum_loss += outputs.loss.detach().float() * n_tokens.float()
 
                 if accelerator.sync_gradients:
+                    total_tokens = (
+                        accelerator.gather(running_token_count).sum().clamp(min=1).float()
+                    )
                     trainable_params = [
                         p
                         for p in accelerator.unwrap_model(model).parameters()
                         if p.requires_grad
                     ]
+                    for p in trainable_params:
+                        if p.grad is not None:
+                            p.grad.div_(total_tokens)
                     accelerator.clip_grad_norm_(trainable_params, 1.0)
+                    mean_loss = (
+                        accelerator.gather(running_sum_loss).sum() / total_tokens
+                    ).item()
+                    running_token_count.zero_()
+                    running_sum_loss.zero_()
 
                 optimizer.step()
                 if accelerator.sync_gradients:
@@ -365,11 +381,6 @@ def main() -> None:
                 continue
 
             global_step += 1
-            mean_loss = (
-                accelerator.gather_for_metrics(loss.detach().float().view(1))
-                .mean()
-                .item()
-            )
 
             if global_step % int(cfg["log_steps"]) == 0:
                 log_message(

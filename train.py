@@ -229,6 +229,8 @@ def main() -> None:
         else 0
     )
     optimizer.zero_grad(set_to_none=True)
+    running_token_count = torch.zeros(1, dtype=torch.long, device=accelerator.device)
+    running_sum_loss = torch.zeros(1, dtype=torch.float32, device=accelerator.device)
 
     for epoch in range(starting_epoch, int(cfg["epochs"])):
         accelerator.unwrap_model(model).multi_modal_projector.train()
@@ -240,16 +242,28 @@ def main() -> None:
             with accelerator.accumulate(model):
                 with accelerator.autocast():
                     outputs = model(**batch)
-                loss = outputs.loss
+                n_tokens = (batch["labels"] != -100).sum()
+                loss = outputs.loss * n_tokens.float()
                 accelerator.backward(loss)
+                running_token_count += n_tokens
+                running_sum_loss += outputs.loss.detach().float() * n_tokens.float()
 
                 if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(
-                        accelerator.unwrap_model(
-                            model
-                        ).multi_modal_projector.parameters(),
-                        1.0,
+                    total_tokens = (
+                        accelerator.gather(running_token_count).sum().clamp(min=1).float()
                     )
+                    projector_params = list(
+                        accelerator.unwrap_model(model).multi_modal_projector.parameters()
+                    )
+                    for p in projector_params:
+                        if p.grad is not None:
+                            p.grad.div_(total_tokens)
+                    accelerator.clip_grad_norm_(projector_params, 1.0)
+                    mean_loss = (
+                        accelerator.gather(running_sum_loss).sum() / total_tokens
+                    ).item()
+                    running_token_count.zero_()
+                    running_sum_loss.zero_()
 
                 optimizer.step()
                 if accelerator.sync_gradients:
@@ -260,11 +274,6 @@ def main() -> None:
                 continue
 
             global_step += 1
-            mean_loss = (
-                accelerator.gather_for_metrics(loss.detach().float().view(1))
-                .mean()
-                .item()
-            )
 
             if global_step % int(cfg["log_steps"]) == 0:
                 log_message(
