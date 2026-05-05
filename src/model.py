@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import MethodType
+
 import torch
 from transformers import (
     AutoConfig,
@@ -103,6 +105,7 @@ def build_model(
         model.multi_modal_projector.load_state_dict(projector_state)
 
     _cast_runtime_dtypes(model, torch_dtype, projector_torch_dtype)
+    _patch_projector_input_dtype(model.multi_modal_projector)
 
     return model
 
@@ -171,6 +174,28 @@ def _cast_runtime_dtypes(
         model.language_model.to(model_dtype)
         model.lm_head.to(model_dtype)
     model.multi_modal_projector.to(projector_dtype)
+
+
+def _patch_projector_input_dtype(projector) -> None:
+    """
+    HF LLaVA passes vision-tower hidden states directly into the projector.
+
+    When the frozen vision tower runs in bf16 but the projector is kept in fp32
+    for stable stage-1 alignment, the stock projector forward raises a dtype
+    mismatch in the first Linear. Keep the original module and state_dict keys,
+    but cast inputs to the projector weight dtype before the linear layers.
+    """
+
+    def forward(self, image_features):
+        projector_dtype = self.linear_1.weight.dtype
+        if image_features.dtype != projector_dtype:
+            image_features = image_features.to(projector_dtype)
+        hidden_states = self.linear_1(image_features)
+        hidden_states = self.act(hidden_states)
+        hidden_states = self.linear_2(hidden_states)
+        return hidden_states
+
+    projector.forward = MethodType(forward, projector)
 
 
 def _load_vision_weights(
