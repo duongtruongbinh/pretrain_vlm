@@ -5,7 +5,7 @@ from pathlib import Path
 
 import torch
 from accelerate import Accelerator
-from torch.utils.data import Sampler
+from torch.utils.data import Sampler, WeightedRandomSampler
 
 
 class EpochShuffleSampler(Sampler[int]):
@@ -24,6 +24,27 @@ class EpochShuffleSampler(Sampler[int]):
 
     def __len__(self) -> int:
         return len(self.dataset)
+
+
+def build_weighted_sampler(dataset, seed: int) -> WeightedRandomSampler:
+    """Equal-contribution sampler: each source jsonl contributes 1/n_sources of samples."""
+    n_sources = len(dataset.jsonl_paths)
+    counts = [0] * n_sources
+    for src_idx in dataset.source_indices:
+        counts[src_idx] += 1
+
+    source_weight = [1.0 / c if c > 0 else 0.0 for c in counts]
+    weights = [source_weight[src_idx] for src_idx in dataset.source_indices]
+
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+
+    return WeightedRandomSampler(
+        weights=weights,
+        num_samples=len(dataset),
+        replacement=True,
+        generator=generator,
+    )
 
 
 def log_message(message: str, accelerator: Accelerator, log_path: Path) -> None:
