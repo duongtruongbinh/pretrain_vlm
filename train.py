@@ -231,8 +231,14 @@ def main() -> None:
     optimizer.zero_grad(set_to_none=True)
     running_token_count = torch.zeros(1, dtype=torch.long, device=accelerator.device)
     running_sum_loss = torch.zeros(1, dtype=torch.float32, device=accelerator.device)
+    projector_params = list(
+        accelerator.unwrap_model(model).multi_modal_projector.parameters()
+    )
+    mean_loss = float("nan")
+    mean_loss_tensor = torch.zeros(1, dtype=torch.float32, device=accelerator.device)
 
     for epoch in range(starting_epoch, int(cfg["epochs"])):
+        train_sampler.set_epoch(epoch)
         accelerator.unwrap_model(model).multi_modal_projector.train()
 
         for batch_idx, batch in enumerate(train_loader):
@@ -252,16 +258,17 @@ def main() -> None:
                     total_tokens = (
                         accelerator.gather(running_token_count).sum().clamp(min=1).float()
                     )
-                    projector_params = list(
-                        accelerator.unwrap_model(model).multi_modal_projector.parameters()
-                    )
+                    # DDP all-reduce already averages grads across N ranks, so the
+                    # effective denominator must be (total_tokens / N) to recover
+                    # sum_token_grads / total_tokens.
+                    grad_denom = total_tokens / accelerator.num_processes
                     for p in projector_params:
                         if p.grad is not None:
-                            p.grad.div_(total_tokens)
+                            p.grad.div_(grad_denom)
                     accelerator.clip_grad_norm_(projector_params, 1.0)
-                    mean_loss = (
+                    mean_loss_tensor = (
                         accelerator.gather(running_sum_loss).sum() / total_tokens
-                    ).item()
+                    ).detach()
                     running_token_count.zero_()
                     running_sum_loss.zero_()
 
@@ -276,6 +283,7 @@ def main() -> None:
             global_step += 1
 
             if global_step % int(cfg["log_steps"]) == 0:
+                mean_loss = mean_loss_tensor.item()
                 log_message(
                     f"step {global_step}: train_loss={mean_loss:.6f}",
                     accelerator,
