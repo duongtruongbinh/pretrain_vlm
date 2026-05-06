@@ -1,3 +1,5 @@
+"""Model/processor construction utilities for LLaVA-style VLM training."""
+
 from __future__ import annotations
 
 from types import MethodType
@@ -18,6 +20,7 @@ IMAGE_TOKEN = "<image>"
 # vision_feature_select_strategy is set here and propagated to both
 # LlavaConfig and LlavaProcessor so they never drift apart.
 _VISION_FEATURE_SELECT_STRATEGY = "full"
+_NUM_ADDITIONAL_IMAGE_TOKENS = 0
 DEFAULT_PROJECTOR_DTYPE = "float32"
 
 
@@ -31,11 +34,12 @@ def build_processor(vision_model_name: str, llm_model_name: str) -> LlavaProcess
     one token while the model expects num_patches tokens — causing a runtime
     shape mismatch in _merge_input_ids_with_image_features.
     """
+
     vision_root_config = AutoConfig.from_pretrained(vision_model_name)
     vision_config = getattr(vision_root_config, "vision_config", vision_root_config)
     patch_size = vision_config.patch_size  # 16 for siglip2-so400m-patch16-384
 
-    image_processor = AutoImageProcessor.from_pretrained(vision_model_name)
+    image_processor = AutoImageProcessor.from_pretrained(vision_model_name, use_fast=False)
     tokenizer = AutoTokenizer.from_pretrained(llm_model_name, use_fast=True)
     tokenizer.add_special_tokens({"additional_special_tokens": [IMAGE_TOKEN]})
     if tokenizer.pad_token is None:
@@ -47,6 +51,7 @@ def build_processor(vision_model_name: str, llm_model_name: str) -> LlavaProcess
         tokenizer=tokenizer,
         patch_size=patch_size,
         vision_feature_select_strategy=_VISION_FEATURE_SELECT_STRATEGY,
+        num_additional_image_tokens=_NUM_ADDITIONAL_IMAGE_TOKENS,
     )
 
 
@@ -67,13 +72,12 @@ def build_model(
     Note: build_processor() must be called with the same vision_model_name and
     llm_model_name so the processor's patch_size matches the model's vision config.
     """
-    torch_dtype = _resolve_dtype(model_dtype)
-    projector_torch_dtype = _resolve_dtype(projector_dtype) or torch.float32
+
+    dtype = _resolve_dtype(model_dtype)
+    resolved_projector_dtype = _resolve_dtype(projector_dtype) or torch.float32
 
     # Use build_processor to resolve patch_size and token IDs consistently.
-    processor = build_processor(
-        vision_model_name, tokenizer_name_or_path or llm_model_name
-    )
+    processor = build_processor(vision_model_name, tokenizer_name_or_path or llm_model_name)
     tokenizer = processor.tokenizer
     image_token_index = tokenizer.convert_tokens_to_ids(IMAGE_TOKEN)
 
@@ -92,8 +96,8 @@ def build_model(
 
     model = LlavaForConditionalGeneration(llava_config)
 
-    _load_vision_weights(model, vision_model_name, torch_dtype)
-    _load_llm_weights(model, llm_model_name, torch_dtype)
+    _load_vision_weights(model, vision_model_name, dtype)
+    _load_llm_weights(model, llm_model_name, dtype)
 
     # Resize after loading the pretrained LLM so existing token embeddings and
     # lm_head rows are preserved. The new <image> token is only a placeholder
@@ -104,18 +108,17 @@ def build_model(
     if projector_state is not None:
         model.multi_modal_projector.load_state_dict(projector_state)
 
-    _cast_runtime_dtypes(model, torch_dtype, projector_torch_dtype)
+    _cast_runtime_dtypes(model, dtype, resolved_projector_dtype)
     _patch_projector_input_dtype(model.multi_modal_projector)
 
     return model
 
 
 def freeze_components(
-    model: LlavaForConditionalGeneration,
-    freeze_vision: bool,
-    train_projector: bool,
-    train_llm: bool,
+    model: LlavaForConditionalGeneration, freeze_vision: bool, train_projector: bool, train_llm: bool
 ) -> None:
+    """Enable/disable gradients for each major model component."""
+
     model.vision_tower.requires_grad_(not freeze_vision)
     model.multi_modal_projector.requires_grad_(train_projector)
     model.language_model.requires_grad_(train_llm)
@@ -125,29 +128,18 @@ def freeze_components(
 
 
 def set_component_modes(
-    model: LlavaForConditionalGeneration,
-    freeze_vision: bool,
-    train_projector: bool,
-    train_llm: bool,
+    model: LlavaForConditionalGeneration, freeze_vision: bool, train_projector: bool, train_llm: bool
 ) -> None:
+    """Set `.train()` modes for each major model component."""
+
     model.vision_tower.train(not freeze_vision)
     model.multi_modal_projector.train(train_projector)
     model.language_model.train(train_llm)
     model.lm_head.train(train_llm)
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-
 def _resolve_dtype(dtype_name: str | None) -> torch.dtype | None:
-    if not dtype_name or str(dtype_name).strip().lower() in {
-        "",
-        "auto",
-        "none",
-        "null",
-    }:
+    if not dtype_name or str(dtype_name).strip().lower() in {"", "auto", "none", "null"}:
         return None
     mapping = {
         "float32": torch.float32,
@@ -165,9 +157,7 @@ def _resolve_dtype(dtype_name: str | None) -> torch.dtype | None:
 
 
 def _cast_runtime_dtypes(
-    model: LlavaForConditionalGeneration,
-    model_dtype: torch.dtype | None,
-    projector_dtype: torch.dtype,
+    model: LlavaForConditionalGeneration, model_dtype: torch.dtype | None, projector_dtype: torch.dtype
 ) -> None:
     if model_dtype is not None:
         model.vision_tower.to(model_dtype)
@@ -186,6 +176,15 @@ def _patch_projector_input_dtype(projector) -> None:
     but cast inputs to the projector weight dtype before the linear layers.
     """
 
+    if not hasattr(projector, "post_norm"):
+        hidden_size = projector.linear_2.out_features
+        projector.post_norm = torch.nn.LayerNorm(hidden_size)
+
+    projector.post_norm.to(
+        device=projector.linear_2.weight.device,
+        dtype=projector.linear_2.weight.dtype,
+    )
+
     def forward(self, image_features):
         projector_dtype = self.linear_1.weight.dtype
         if image_features.dtype != projector_dtype:
@@ -193,30 +192,27 @@ def _patch_projector_input_dtype(projector) -> None:
         hidden_states = self.linear_1(image_features)
         hidden_states = self.act(hidden_states)
         hidden_states = self.linear_2(hidden_states)
+        hidden_states = self.post_norm(hidden_states)
         return hidden_states
 
     projector.forward = MethodType(forward, projector)
 
 
 def _load_vision_weights(
-    model: LlavaForConditionalGeneration,
-    vision_model_name: str,
-    torch_dtype: torch.dtype | None,
+    model: LlavaForConditionalGeneration, vision_model_name: str, dtype: torch.dtype | None
 ) -> None:
     full_siglip = AutoModel.from_pretrained(
-        vision_model_name, torch_dtype=torch_dtype, low_cpu_mem_usage=True
+        vision_model_name, dtype=dtype, low_cpu_mem_usage=True
     ).vision_model
     model.vision_tower.load_state_dict(full_siglip.state_dict(), strict=False)
     del full_siglip
 
 
 def _load_llm_weights(
-    model: LlavaForConditionalGeneration,
-    llm_model_name: str,
-    torch_dtype: torch.dtype | None,
+    model: LlavaForConditionalGeneration, llm_model_name: str, dtype: torch.dtype | None
 ) -> None:
     llm = AutoModelForCausalLM.from_pretrained(
-        llm_model_name, torch_dtype=torch_dtype, low_cpu_mem_usage=True
+        llm_model_name, dtype=dtype, low_cpu_mem_usage=True
     )
     # LlavaForConditionalGeneration.language_model is the bare LlamaModel.
     # AutoModelForCausalLM.state_dict() keys are prefixed with "model.", so
@@ -225,3 +221,4 @@ def _load_llm_weights(
     model.language_model.load_state_dict(llm.model.state_dict(), strict=True)
     model.lm_head.load_state_dict(llm.lm_head.state_dict(), strict=True)
     del llm
+

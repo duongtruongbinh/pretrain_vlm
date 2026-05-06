@@ -11,7 +11,7 @@ from datasets import Image as HfImage
 from datasets import load_dataset
 from PIL import Image
 
-from src.config import load_config
+from src.runtime import load_config
 
 
 IMAGE_FIELD_CANDIDATES = ("image", "Image", "img")
@@ -55,9 +55,7 @@ def select_field(field_names, *, override, candidates, field_label: str) -> str:
     for candidate in candidates:
         if candidate in field_names:
             log_check(
-                f"{field_label}_auto_select",
-                True,
-                f"Selected field '{candidate}' from {list(field_names)}.",
+                f"{field_label}_auto_select", True, f"Selected field '{candidate}' from {list(field_names)}."
             )
             return candidate
 
@@ -113,7 +111,9 @@ def stable_split_for_image(image_key: str, seed: int, val_ratio: float, test_rat
     return "train"
 
 
-def determine_output_split(raw_split: str, *, split_mode: str, image_key: str, seed: int, val_ratio: float, test_ratio: float) -> str:
+def determine_output_split(
+    raw_split: str, *, split_mode: str, image_key: str, seed: int, val_ratio: float, test_ratio: float
+) -> str:
     normalized_mode = str(split_mode).strip().lower()
     normalized_raw_split = SPLIT_NAME_MAP.get(str(raw_split).strip().lower())
 
@@ -185,7 +185,16 @@ def save_image_asset(image_value, destination: Path) -> None:
             image.convert("RGB").save(destination)
 
 
-def build_description_sample(*, sample_id: str, image_path: Path, image_key: str, system_prompt: str, user_prompt: str, assistant_text: str, source_dataset: str) -> dict:
+def build_description_sample(
+    *,
+    sample_id: str,
+    image_path: Path,
+    image_key: str,
+    system_prompt: str,
+    user_prompt: str,
+    assistant_text: str,
+    source_dataset: str,
+) -> dict:
     return {
         "id": sample_id,
         "image": str(image_path.resolve()),
@@ -200,7 +209,15 @@ def build_description_sample(*, sample_id: str, image_path: Path, image_key: str
     }
 
 
-def build_qna_samples(*, image_path: Path, image_key: str, qna_messages: list[dict[str, str]], system_prompt: str, sample_id_prefix: str, source_dataset: str) -> list[dict]:
+def build_qna_samples(
+    *,
+    image_path: Path,
+    image_key: str,
+    qna_messages: list[dict[str, str]],
+    system_prompt: str,
+    sample_id_prefix: str,
+    source_dataset: str,
+) -> list[dict]:
     built_samples = []
     conversation = [{"role": "system", "content": system_prompt}]
 
@@ -251,10 +268,7 @@ def main() -> None:
         field_label="description",
     )
     qna_field = select_field(
-        first_features,
-        override=config.get("qna_field"),
-        candidates=QNA_FIELD_CANDIDATES,
-        field_label="qna",
+        first_features, override=config.get("qna_field"), candidates=QNA_FIELD_CANDIDATES, field_label="qna"
     )
 
     log("[instruction-data] schema summary:")
@@ -277,10 +291,16 @@ def main() -> None:
     configured_split_mode = str(config.get("split_mode", "auto")).strip().lower()
     mapped_raw_splits = {SPLIT_NAME_MAP.get(str(split_name).strip().lower()) for split_name in raw_splits}
     if configured_split_mode == "auto":
-        effective_split_mode = "source" if {"train", "val", "test"}.issubset(mapped_raw_splits) else "image_level"
+        effective_split_mode = (
+            "source" if {"train", "val", "test"}.issubset(mapped_raw_splits) else "image_level"
+        )
     else:
         effective_split_mode = configured_split_mode
-    log_check("split_mode", True, f"Resolved split_mode='{effective_split_mode}' from configured value '{configured_split_mode}'.")
+    log_check(
+        "split_mode",
+        True,
+        f"Resolved split_mode='{effective_split_mode}' from configured value '{configured_split_mode}'.",
+    )
 
     if bool(config.get("inspect_only", False)):
         log("[instruction-data] inspect_only=true, stopping after schema checks.")
@@ -317,7 +337,9 @@ def main() -> None:
                 processed_rows += 1
                 counters["rows_total"] += 1
                 try:
-                    image_key = infer_image_key(row, image_field=image_field, row_index=row_index, raw_split=raw_split)
+                    image_key = infer_image_key(
+                        row, image_field=image_field, row_index=row_index, raw_split=raw_split
+                    )
                     output_split = determine_output_split(
                         raw_split,
                         split_mode=effective_split_mode,
@@ -329,7 +351,9 @@ def main() -> None:
 
                     previous_split = image_id_to_split.setdefault(image_key, output_split)
                     if previous_split != output_split:
-                        raise RuntimeError(f"Image '{image_key}' was assigned to both '{previous_split}' and '{output_split}'.")
+                        raise RuntimeError(
+                            f"Image '{image_key}' was assigned to both '{previous_split}' and '{output_split}'."
+                        )
 
                     image_value = row[image_field]
                     image_extension = infer_image_extension(image_value, image_key=image_key)
@@ -390,7 +414,11 @@ def main() -> None:
                         )
                 except Exception as error:
                     error_text = str(error).lower()
-                    if "image payload" in error_text or "unsupported image" in error_text or "cannot identify image file" in error_text:
+                    if (
+                        "image payload" in error_text
+                        or "unsupported image" in error_text
+                        or "cannot identify image file" in error_text
+                    ):
                         counters["rows_missing_or_bad_image"] += 1
                     elif "qna" in error_text or "assistant" in error_text or "user" in error_text:
                         counters["rows_malformed_qna"] += 1
@@ -405,20 +433,22 @@ def main() -> None:
         for handle in output_handles.values():
             handle.close()
 
-    log_check("samples_written", counters["samples_written"] > 0, f"Wrote {counters['samples_written']} instruction samples.")
-    leakage_free = split_to_image_ids["train"].isdisjoint(split_to_image_ids["val"]) and split_to_image_ids["train"].isdisjoint(
-        split_to_image_ids["test"]
-    ) and split_to_image_ids["val"].isdisjoint(split_to_image_ids["test"])
+    log_check(
+        "samples_written",
+        counters["samples_written"] > 0,
+        f"Wrote {counters['samples_written']} instruction samples.",
+    )
+    leakage_free = (
+        split_to_image_ids["train"].isdisjoint(split_to_image_ids["val"])
+        and split_to_image_ids["train"].isdisjoint(split_to_image_ids["test"])
+        and split_to_image_ids["val"].isdisjoint(split_to_image_ids["test"])
+    )
     log_check("image_level_split", leakage_free, "Verified that train/val/test image sets are disjoint.")
 
     report = {
         "dataset_name": dataset_name,
         "raw_splits": raw_splits,
-        "selected_fields": {
-            "image": image_field,
-            "description": description_field,
-            "qna": qna_field,
-        },
+        "selected_fields": {"image": image_field, "description": description_field, "qna": qna_field},
         "config": {
             "split_mode": effective_split_mode,
             "split_seed": int(config.get("split_seed", 42)),
@@ -450,7 +480,9 @@ def main() -> None:
         "approx_message_word_count": {
             "min": min(approx_token_lengths) if approx_token_lengths else 0,
             "max": max(approx_token_lengths) if approx_token_lengths else 0,
-            "mean": round(sum(approx_token_lengths) / len(approx_token_lengths), 2) if approx_token_lengths else 0.0,
+            "mean": round(sum(approx_token_lengths) / len(approx_token_lengths), 2)
+            if approx_token_lengths
+            else 0.0,
         },
     }
     report_path = output_dir / "prepare_report.json"
