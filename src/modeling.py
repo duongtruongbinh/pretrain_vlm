@@ -208,6 +208,7 @@ def build_model(
     if projector_state is not None:
         model.multi_modal_projector.load_state_dict(projector_state, strict=False)
     _patch_projector_input_dtype(model.multi_modal_projector)
+    _patch_last_hidden_state_image_features(model)
 
     return model
 
@@ -342,13 +343,73 @@ def _patch_projector_input_dtype(projector) -> None:
     projector.forward = MethodType(forward, projector)
 
 
+def _patch_last_hidden_state_image_features(model: LlavaForConditionalGeneration) -> None:
+    """
+    Match the local vlm_pretrain baseline by feeding SigLIP last_hidden_state
+    into the multimodal projector instead of HF LLaVA's hidden_states[layer].
+    """
+
+    def get_image_features(
+        self,
+        pixel_values: torch.FloatTensor,
+        vision_feature_layer=None,
+        vision_feature_select_strategy: str | None = None,
+        **kwargs,
+    ):
+        vision_feature_select_strategy = (
+            vision_feature_select_strategy
+            if vision_feature_select_strategy is not None
+            else self.config.vision_feature_select_strategy
+        )
+        if vision_feature_select_strategy not in {"default", "full"}:
+            raise ValueError(
+                f"Unexpected select feature strategy: {vision_feature_select_strategy}"
+            )
+
+        image_sizes = kwargs.pop("image_sizes", None)
+        kwargs = {k: v for k, v in kwargs.items() if v is not None}
+
+        image_outputs = self.vision_tower(
+            pixel_values,
+            output_hidden_states=False,
+            return_dict=True,
+            **kwargs,
+        )
+        selected_image_feature = image_outputs.last_hidden_state
+        if vision_feature_select_strategy == "default":
+            selected_image_feature = selected_image_feature[:, 1:]
+
+        image_features = self.multi_modal_projector(selected_image_feature)
+        if image_sizes is not None:
+            patch_size = getattr(
+                self.vision_tower,
+                "patch_size",
+                self.config.vision_config.patch_size,
+            )
+            if isinstance(image_sizes, torch.Tensor):
+                image_sizes = image_sizes.tolist()
+            split_sizes = [
+                (int(height) // patch_size) * (int(width) // patch_size)
+                for height, width in image_sizes
+            ]
+            image_features = torch.split(image_features.squeeze(0), split_sizes)
+        else:
+            image_features = list(image_features)
+        return image_features
+
+    model.model.get_image_features = MethodType(get_image_features, model.model)
+
+
 def _load_vision_weights(
     model: LlavaForConditionalGeneration, vision_model_name: str, dtype: torch.dtype | None
 ) -> None:
     full_siglip = AutoModel.from_pretrained(
         vision_model_name, dtype=dtype, low_cpu_mem_usage=True
     ).vision_model
-    model.vision_tower.load_state_dict(full_siglip.state_dict(), strict=False)
+    target = model.vision_tower
+    if hasattr(target, "vision_model"):
+        target = target.vision_model
+    target.load_state_dict(full_siglip.state_dict(), strict=True)
     del full_siglip
 
 
