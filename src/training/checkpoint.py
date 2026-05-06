@@ -80,7 +80,7 @@ def load_projector_checkpoint(
 
     raw = torch.load(checkpoint_path / "projector.pt", map_location="cpu")
     raw_state = raw["projector_state_dict"] if "projector_state_dict" in raw else raw
-    model.multi_modal_projector.load_state_dict(_remap_projector_state(raw_state))
+    model.multi_modal_projector.load_state_dict(_remap_projector_state(raw_state), strict=False)
     _maybe_load_optimizer_scheduler(checkpoint_path, optimizer, scheduler)
     if restore_rng:
         _restore_rng_state(checkpoint_path / "rng_state.pt")
@@ -150,9 +150,9 @@ def rotate_checkpoints(
 def _load_legacy_projector_ckpt(path: Path, model, optimizer=None, scheduler=None) -> dict[str, Any]:
     ckpt = torch.load(str(path), map_location="cpu")
     state = _remap_projector_state(ckpt["projector_state_dict"])
-    model.multi_modal_projector.load_state_dict(state)
+    model.multi_modal_projector.load_state_dict(state, strict=False)
     if optimizer is not None and "optimizer_state_dict" in ckpt:
-        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        _safe_load_optimizer_state(optimizer, ckpt["optimizer_state_dict"])
     if scheduler is not None and "scheduler_state_dict" in ckpt:
         scheduler.load_state_dict(ckpt["scheduler_state_dict"])
     return {"global_step": int(ckpt.get("step", 0)), "epoch": 0, "best_eval_loss": None}
@@ -174,9 +174,21 @@ def _load_trainer_state(checkpoint_dir: Path) -> dict[str, Any]:
 
 def _maybe_load_optimizer_scheduler(checkpoint_dir: Path, optimizer=None, scheduler=None) -> None:
     if optimizer is not None and (checkpoint_dir / "optimizer.pt").exists():
-        optimizer.load_state_dict(torch.load(checkpoint_dir / "optimizer.pt", map_location="cpu"))
+        _safe_load_optimizer_state(
+            optimizer, torch.load(checkpoint_dir / "optimizer.pt", map_location="cpu")
+        )
     if scheduler is not None and (checkpoint_dir / "scheduler.pt").exists():
         scheduler.load_state_dict(torch.load(checkpoint_dir / "scheduler.pt", map_location="cpu"))
+
+
+def _safe_load_optimizer_state(optimizer, state_dict) -> None:
+    try:
+        optimizer.load_state_dict(state_dict)
+    except ValueError as error:
+        print(
+            "[checkpoint][warn] skipped optimizer state because the "
+            f"projector parameter set changed: {error}"
+        )
 
 
 def _checkpoint_step(path: Path) -> int | None:
