@@ -122,7 +122,7 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = output_dir / "metrics.jsonl"
 
-    accelerator = Accelerator(gradient_accumulation_steps=int(cfg["grad_accum"]))
+    accelerator = Accelerator()
     logger = setup_logger(output_dir, accelerator)
     set_seed(int(cfg["seed"]))
 
@@ -152,14 +152,6 @@ def main() -> None:
         cfg["llm_model"],
         model_dtype=cfg.get("model_dtype"),
         projector_dtype=cfg.get("projector_dtype", "float32"),
-        projector_norm=cfg.get("projector_norm"),
-        projector_norm_target_multiplier=float(
-            cfg.get("projector_norm_target_multiplier", 3.0)
-        ),
-        projector_norm_trainable=bool(cfg.get("projector_norm_trainable", True)),
-        projector_norm_min_multiplier=cfg.get("projector_norm_min_multiplier", 1.0),
-        projector_norm_max_multiplier=cfg.get("projector_norm_max_multiplier", 10.0),
-        projector_norm_eps=float(cfg.get("projector_norm_eps", 1e-6)),
     )
     freeze_components(model, freeze_vision=True, train_projector=True, train_llm=False)
 
@@ -203,15 +195,6 @@ def main() -> None:
         warmup_steps,
         output_dir,
     )
-    logger.info(
-        "Projector norm: type={}, target_multiplier={}, trainable={}, clamp=[{}, {}]",
-        cfg.get("projector_norm", "none"),
-        cfg.get("projector_norm_target_multiplier", "n/a"),
-        cfg.get("projector_norm_trainable", False),
-        cfg.get("projector_norm_min_multiplier", "none"),
-        cfg.get("projector_norm_max_multiplier", "none"),
-    )
-
     progress_total = max(total_steps - state.global_step, 0)
     progress = (
         tqdm(total=progress_total, initial=0, desc="stage1", dynamic_ncols=True)

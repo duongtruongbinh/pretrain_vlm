@@ -180,9 +180,7 @@ def main() -> None:
     if mixed_precision == "bf16" and torch.cuda.is_available() and not torch.cuda.is_bf16_supported():
         raise RuntimeError("bf16 not supported on this device. Set mixed_precision to fp16.")
 
-    accelerator = Accelerator(
-        gradient_accumulation_steps=int(cfg["grad_accum"]), mixed_precision=mixed_precision
-    )
+    accelerator = Accelerator(mixed_precision=mixed_precision)
     logger = setup_logger(output_dir, accelerator)
     set_seed(int(cfg["seed"]))
 
@@ -216,14 +214,6 @@ def main() -> None:
         tokenizer_name_or_path=tokenizer_source,
         model_dtype=cfg.get("model_dtype"),
         projector_dtype=cfg.get("projector_dtype", "float32"),
-        projector_norm=cfg.get("projector_norm"),
-        projector_norm_target_multiplier=float(
-            cfg.get("projector_norm_target_multiplier", 3.0)
-        ),
-        projector_norm_trainable=bool(cfg.get("projector_norm_trainable", True)),
-        projector_norm_min_multiplier=cfg.get("projector_norm_min_multiplier", 1.0),
-        projector_norm_max_multiplier=cfg.get("projector_norm_max_multiplier", 10.0),
-        projector_norm_eps=float(cfg.get("projector_norm_eps", 1e-6)),
     )
     component_modes = {
         "freeze_vision": bool(cfg.get("freeze_vision", True)),

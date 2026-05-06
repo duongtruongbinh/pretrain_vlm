@@ -10,7 +10,7 @@ export TORCH_NCCL_ASYNC_ERROR_HANDLING="${TORCH_NCCL_ASYNC_ERROR_HANDLING:-1}"
 /home/shared/miniconda3/envs/nhantd_env/bin/accelerate launch \
   --num_processes "${NUM_PROCESSES:-2}" \
   --num_machines 1 \
-  --mixed_precision "${MIXED_PRECISION:-no}" \
+  --mixed_precision "${MIXED_PRECISION:-bf16}" \
   --main_process_port "${MAIN_PROCESS_PORT:-0}" \
   --dynamo_backend no \
   --multi_gpu \

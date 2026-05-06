@@ -127,7 +127,7 @@ def _train_window(
                 continue
 
             batch_loss_sum = outputs.loss.float() * batch_tokens.float()
-            scaled_loss = batch_loss_sum * grad_accum * accelerator.num_processes / global_tokens
+            scaled_loss = batch_loss_sum * accelerator.num_processes / global_tokens
             accelerator.backward(scaled_loss)
             local_loss_sum = local_loss_sum + batch_loss_sum.detach().to(local_loss_sum.device)
             local_token_sum = local_token_sum + batch_tokens.detach().float().to(local_token_sum.device)
