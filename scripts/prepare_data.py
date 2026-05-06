@@ -8,7 +8,7 @@ from pathlib import Path
 
 import gdown
 
-from src.config import load_config
+from src.runtime import load_config
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
@@ -64,7 +64,11 @@ def extract_images_zip(images_zip_path: Path, images_root: Path) -> None:
         archive.extractall(temp_extract_dir)
 
     extracted_entries = list(temp_extract_dir.iterdir())
-    source_root = extracted_entries[0] if len(extracted_entries) == 1 and extracted_entries[0].is_dir() else temp_extract_dir
+    source_root = (
+        extracted_entries[0]
+        if len(extracted_entries) == 1 and extracted_entries[0].is_dir()
+        else temp_extract_dir
+    )
 
     images_root.mkdir(parents=True, exist_ok=True)
     for child in source_root.iterdir():
@@ -112,7 +116,9 @@ def iter_annotation_records(annotation_path: Path):
         annotation_data = json.load(handle)
 
     if isinstance(annotation_data, dict) and "images" in annotation_data and "annotations" in annotation_data:
-        image_id_to_file_name = {image_info["id"]: image_info["file_name"] for image_info in annotation_data["images"]}
+        image_id_to_file_name = {
+            image_info["id"]: image_info["file_name"] for image_info in annotation_data["images"]
+        }
         for annotation in annotation_data["annotations"]:
             image_name = image_id_to_file_name[annotation["image_id"]]
             captions = [annotation["caption"]]
@@ -122,7 +128,9 @@ def iter_annotation_records(annotation_path: Path):
     if isinstance(annotation_data, dict):
         for image_name, metadata in annotation_data.items():
             if not isinstance(metadata, dict) or "captions" not in metadata:
-                raise ValueError(f"Unsupported annotation entry for image '{image_name}' in {annotation_path}")
+                raise ValueError(
+                    f"Unsupported annotation entry for image '{image_name}' in {annotation_path}"
+                )
             yield image_name, metadata["captions"]
         return
 
@@ -195,10 +203,7 @@ def main() -> None:
                         continue
 
                     json.dump(
-                        {
-                            "image": str(output_image_path.resolve()),
-                            "caption": caption,
-                        },
+                        {"image": str(output_image_path.resolve()), "caption": caption},
                         handle,
                         ensure_ascii=False,
                     )
@@ -206,8 +211,7 @@ def main() -> None:
                     written_rows += 1
 
         print(
-            f"Wrote {output_jsonl_path} "
-            f"(rows={written_rows}, skipped_empty_captions={skipped_empty_captions})"
+            f"Wrote {output_jsonl_path} (rows={written_rows}, skipped_empty_captions={skipped_empty_captions})"
         )
 
 

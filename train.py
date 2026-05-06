@@ -1,5 +1,6 @@
 from __future__ import annotations
-import math
+
+import argparse
 from pathlib import Path
 
 import torch
@@ -7,30 +8,48 @@ from accelerate import Accelerator
 from PIL import Image
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
 from transformers import get_cosine_schedule_with_warmup
 
-from src.checkpoint import load_projector_ckpt, rotate_checkpoints, save_projector_ckpt
-from src.collator import PROMPT_TEMPLATE, ImageCaptionCollator
-from src.config import load_config
-from src.dataset import ImageCaptionDataset
-from src.model import build_model, freeze_components
-from src.paths import resolve_config_paths
-from src.trainer import append_jsonl, build_weighted_sampler, evaluate_loss, log_message
-from src.utils import set_seed
+from src.collators import PROMPT_TEMPLATE, CaptionCollator
+from src.data import ImageCaptionDataset
+from src.modeling import build_model, freeze_components
+from src.runtime import (
+    append_jsonl,
+    build_weighted_sampler,
+    load_config,
+    resolve_config_paths,
+    set_seed,
+    setup_logger,
+)
+from src.training.checkpoint import (
+    load_projector_checkpoint,
+    rotate_checkpoints,
+    save_training_checkpoint,
+    update_checkpoint_pointer,
+)
+from src.training.engine import TrainingState, compute_steps_per_epoch, run_training
+from src.training.eval import run_evaluation
+
+
+def _parse_args() -> argparse.Namespace:
+    """Parse runtime-only arguments that should not live in config.yaml."""
+
+    parser = argparse.ArgumentParser(description="Caption projector pretraining.")
+    parser.add_argument("--resume-from", type=str, default=None)
+    return parser.parse_args()
 
 
 def _select_eval_samples(records: list[dict], sample_count: int = 5) -> list[dict]:
+    """Select a small deterministic set of unique-image eval samples."""
+
     if sample_count <= 0 or not records:
         return []
     if len(records) <= sample_count:
         return records
 
-    anchors = [
-        round(i * (len(records) - 1) / (sample_count - 1)) for i in range(sample_count)
-    ]
-    selected = []
-    seen_images = set()
-
+    anchors = [round(i * (len(records) - 1) / (sample_count - 1)) for i in range(sample_count)]
+    selected, seen_images = [], set()
     for anchor in anchors:
         for offset in range(len(records)):
             record = records[(anchor + offset) % len(records)]
@@ -44,16 +63,12 @@ def _select_eval_samples(records: list[dict], sample_count: int = 5) -> list[dic
     for record in records:
         if len(selected) >= sample_count:
             break
-        if id(record) in selected_ids:
-            continue
-        selected.append(record)
-
+        if id(record) not in selected_ids:
+            selected.append(record)
     return selected[:sample_count]
 
 
-def _log_eval_samples(
-    model, collator, eval_samples, accelerator, max_new_tokens, log_path
-):
+def _log_eval_samples(model, collator, eval_samples, accelerator, max_new_tokens):
     unwrapped = accelerator.unwrap_model(model)
     tokenizer = collator.processor.tokenizer
     lines = []
@@ -63,18 +78,12 @@ def _log_eval_samples(
                 img = img.convert("RGB")
         except Exception as e:
             line = f"[sample {idx}] failed to load {sample['image']}: {e}"
-            accelerator.print(line)
             lines.append(line)
             continue
 
-        inputs = collator.processor(
-            text=PROMPT_TEMPLATE, images=img, return_tensors="pt"
-        )
+        inputs = collator.processor(text=PROMPT_TEMPLATE, images=img, return_tensors="pt")
         inputs = {k: v.to(accelerator.device) for k, v in inputs.items()}
-
-        eos_ids = sorted(
-            {tokenizer.eos_token_id, tokenizer.convert_tokens_to_ids("<|end_of_text|>")}
-        )
+        eos_ids = sorted({tokenizer.eos_token_id, tokenizer.convert_tokens_to_ids("<|end_of_text|>")})
         with torch.no_grad(), accelerator.autocast():
             generated_ids = unwrapped.generate(
                 **inputs,
@@ -86,158 +95,37 @@ def _log_eval_samples(
             )
 
         input_len = inputs["input_ids"].shape[1]
-        generated_text = tokenizer.decode(
-            generated_ids[0, input_len:], skip_special_tokens=True
-        ).strip()
-        raw_generated_text = tokenizer.decode(
-            generated_ids[0, input_len:], skip_special_tokens=False
-        ).strip()
-        prediction = generated_text or "<empty>"
+        generated_text = tokenizer.decode(generated_ids[0, input_len:], skip_special_tokens=True).strip()
+        raw_generated_text = tokenizer.decode(generated_ids[0, input_len:], skip_special_tokens=False).strip()
         for line in [
-            f"[sample {idx}] prediction: {prediction}",
+            f"[sample {idx}] prediction: {generated_text or '<empty>'}",
             f"[sample {idx}] prediction_raw: {raw_generated_text or '<empty>'}",
             f"[sample {idx}] reference: {sample['caption']}",
             f"[sample {idx}] image: {sample['image']}",
         ]:
-            accelerator.print(line)
             lines.append(line)
     return lines
 
 
-def _tensor_stats(values: torch.Tensor) -> dict[str, float]:
-    flat = values.detach().float().reshape(-1, values.shape[-1])
-    token_norm = flat.norm(dim=-1)
-    return {
-        "std": float(flat.std().cpu()),
-        "token_norm": float(token_norm.mean().cpu()),
-    }
-
-
-def _projector_scale_stats(model, collator, sample: dict, accelerator) -> dict[str, float] | None:
-    unwrapped = accelerator.unwrap_model(model)
-    tokenizer = collator.processor.tokenizer
-
+def _current_lr(scheduler, optimizer) -> float:
     try:
-        with Image.open(sample["image"]) as img:
-            image = img.convert("RGB")
+        return float(scheduler.get_last_lr()[0])
     except Exception:
-        return None
-
-    black_image = Image.new("RGB", image.size, (0, 0, 0))
-    vision_dtype = next(unwrapped.vision_tower.parameters()).dtype
-    image_token_id = tokenizer.convert_tokens_to_ids("<image>")
-
-    def encode(image_obj):
-        inputs = collator.processor(
-            text=PROMPT_TEMPLATE, images=image_obj, return_tensors="pt"
-        )
-        input_ids = inputs["input_ids"].to(accelerator.device)
-        pixel_values = inputs["pixel_values"].to(
-            device=accelerator.device, dtype=vision_dtype
-        )
-        vision_outputs = unwrapped.vision_tower(
-            pixel_values=pixel_values,
-            output_hidden_states=True,
-            return_dict=True,
-        )
-        feature_layer = unwrapped.config.vision_feature_layer
-        select_strategy = unwrapped.config.vision_feature_select_strategy
-        if isinstance(feature_layer, int):
-            selected_features = vision_outputs.hidden_states[feature_layer]
-            if select_strategy == "default":
-                selected_features = selected_features[:, 1:]
-        else:
-            hidden_states = [vision_outputs.hidden_states[idx] for idx in feature_layer]
-            if select_strategy == "default":
-                hidden_states = [state[:, 1:] for state in hidden_states]
-            selected_features = torch.cat(hidden_states, dim=-1)
-
-        image_features = unwrapped.multi_modal_projector(selected_features)
-        text_mask = input_ids != image_token_id
-        if tokenizer.pad_token_id is not None:
-            text_mask = text_mask & (input_ids != tokenizer.pad_token_id)
-        text_embeds = unwrapped.get_input_embeddings()(input_ids)[text_mask]
-        return image_features, text_embeds
-
-    with torch.no_grad():
-        real_features, text_embeds = encode(image)
-        black_features, _ = encode(black_image)
-
-    real_stats = _tensor_stats(real_features)
-    black_stats = _tensor_stats(black_features)
-    text_stats = _tensor_stats(text_embeds)
-    real_black_cosine = torch.nn.functional.cosine_similarity(
-        real_features.detach().float().flatten(1),
-        black_features.detach().float().flatten(1),
-        dim=-1,
-    ).mean()
-    return {
-        "real_norm": real_stats["token_norm"],
-        "black_norm": black_stats["token_norm"],
-        "text_norm": text_stats["token_norm"],
-        "real_std": real_stats["std"],
-        "black_std": black_stats["std"],
-        "text_std": text_stats["std"],
-        "real_norm_ratio": real_stats["token_norm"]
-        / max(text_stats["token_norm"], 1e-12),
-        "black_norm_ratio": black_stats["token_norm"]
-        / max(text_stats["token_norm"], 1e-12),
-        "real_black_cosine": float(real_black_cosine.cpu()),
-    }
-
-
-def evaluate(
-    model,
-    eval_loader,
-    accelerator,
-    eval_samples,
-    collator,
-    max_new_tokens,
-    global_step,
-    log_path,
-):
-    accelerator.unwrap_model(model).multi_modal_projector.eval()
-    eval_loss = evaluate_loss(model, eval_loader, accelerator)
-    log_message(f"step {global_step}: eval_loss={eval_loss:.6f}", accelerator, log_path)
-
-    lines = _log_eval_samples(
-        model, collator, eval_samples, accelerator, max_new_tokens, log_path
-    )
-    scale_stats = None
-    if eval_samples and accelerator.is_main_process:
-        scale_stats = _projector_scale_stats(model, collator, eval_samples[0], accelerator)
-        if scale_stats is not None:
-            log_message(
-                "Projector scale: "
-                f"real_norm={scale_stats['real_norm']:.3f}, "
-                f"black_norm={scale_stats['black_norm']:.3f}, "
-                f"text_norm={scale_stats['text_norm']:.3f}, "
-                f"real_ratio={scale_stats['real_norm_ratio']:.1f}x, "
-                f"black_ratio={scale_stats['black_norm_ratio']:.1f}x, "
-                f"real_black_cosine={scale_stats['real_black_cosine']:.4f}",
-                accelerator,
-                log_path,
-            )
-    if accelerator.is_main_process:
-        with log_path.open("a", encoding="utf-8") as fh:
-            for line in lines:
-                fh.write(line + "\n")
-
-    accelerator.unwrap_model(model).multi_modal_projector.train()
-    return eval_loss, scale_stats
+        return float(optimizer.param_groups[0]["lr"])
 
 
 def main() -> None:
+    args = _parse_args()
     cfg = load_config("train")
     output_dir = Path(cfg["output_dir"]).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    log_path = output_dir / "train.log"
     metrics_path = output_dir / "metrics.jsonl"
 
     accelerator = Accelerator(gradient_accumulation_steps=int(cfg["grad_accum"]))
+    logger = setup_logger(output_dir, accelerator)
     set_seed(int(cfg["seed"]))
 
-    collator = ImageCaptionCollator(cfg["vision_model"], cfg["llm_model"])
+    collator = CaptionCollator(cfg["vision_model"], cfg["llm_model"])
     train_dataset = ImageCaptionDataset(resolve_config_paths(cfg["train_jsonl"]))
     eval_dataset = ImageCaptionDataset(resolve_config_paths(cfg["eval_jsonl"]))
     eval_samples = _select_eval_samples(eval_dataset.records, sample_count=5)
@@ -280,51 +168,39 @@ def main() -> None:
             gradient_checkpointing_kwargs={"use_reentrant": False}
         )
 
-    optimizer = AdamW(
-        model.multi_modal_projector.parameters(), lr=float(cfg["lr"]), weight_decay=0.0
-    )
+    optimizer = AdamW(model.multi_modal_projector.parameters(), lr=float(cfg["lr"]), weight_decay=0.0)
     model, optimizer, train_loader, eval_loader = accelerator.prepare(
         model, optimizer, train_loader, eval_loader
     )
 
-    steps_per_epoch = math.ceil(len(train_loader) / int(cfg["grad_accum"]))
+    grad_accum = int(cfg["grad_accum"])
+    steps_per_epoch = compute_steps_per_epoch(len(train_loader), grad_accum)
     total_steps = steps_per_epoch * int(cfg["epochs"])
     warmup_steps = int(total_steps * float(cfg["warmup_ratio"]))
     scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, total_steps)
+    state = TrainingState()
 
-    global_step = 0
-    resume_from = cfg.get("resume_from")
-    if resume_from:
-        global_step = load_projector_ckpt(
-            resume_from, accelerator.unwrap_model(model), optimizer, scheduler
+    if args.resume_from:
+        resume_state = load_projector_checkpoint(
+            args.resume_from, accelerator.unwrap_model(model), optimizer, scheduler
         )
-        log_message(
-            f"Resumed from {resume_from} at step {global_step}.", accelerator, log_path
-        )
+        state.global_step = int(resume_state.get("global_step", 0))
+        state.best_eval_loss = resume_state.get("best_eval_loss")
+        logger.info("Resumed from {} at step {}.", args.resume_from, state.global_step)
 
-    log_message(
-        f"Starting training: {len(train_dataset)} train, {len(eval_dataset)} eval.",
-        accelerator,
-        log_path,
-    )
-    log_message(
+    logger.info("Starting training: {} train, {} eval.", len(train_dataset), len(eval_dataset))
+    logger.info(
         "Training config: "
-        f"processes={accelerator.num_processes}, "
-        f"per_device_batch={int(cfg['batch_size'])}, "
-        f"grad_accum={int(cfg['grad_accum'])}, "
-        f"effective_batch={int(cfg['batch_size']) * int(cfg['grad_accum']) * accelerator.num_processes}, "
-        f"steps_per_epoch={steps_per_epoch}, total_steps={total_steps}, "
-        f"warmup_steps={warmup_steps}, output_dir={output_dir}",
-        accelerator,
-        log_path,
-    )
-    log_message(
-        "Runtime dtypes: "
-        f"vision={next(accelerator.unwrap_model(model).vision_tower.parameters()).dtype}, "
-        f"llm={next(accelerator.unwrap_model(model).language_model.parameters()).dtype}, "
-        f"projector={next(accelerator.unwrap_model(model).multi_modal_projector.parameters()).dtype}",
-        accelerator,
-        log_path,
+        "processes={}, per_device_batch={}, grad_accum={}, effective_batch={}, "
+        "steps_per_epoch={}, total_steps={}, warmup_steps={}, output_dir={}",
+        accelerator.num_processes,
+        int(cfg["batch_size"]),
+        grad_accum,
+        int(cfg["batch_size"]) * grad_accum * accelerator.num_processes,
+        steps_per_epoch,
+        total_steps,
+        warmup_steps,
+        output_dir,
     )
     log_message(
         "Projector norm: "
@@ -337,125 +213,113 @@ def main() -> None:
         log_path,
     )
 
-    starting_epoch = global_step // steps_per_epoch if steps_per_epoch > 0 else 0
-    batches_to_skip = (
-        (global_step % steps_per_epoch) * int(cfg["grad_accum"])
-        if steps_per_epoch > 0
-        else 0
+    progress_total = max(total_steps - state.global_step, 0)
+    progress = (
+        tqdm(total=progress_total, initial=0, desc="stage1", dynamic_ncols=True)
+        if accelerator.is_main_process
+        else None
     )
-    optimizer.zero_grad(set_to_none=True)
-    running_token_count = torch.zeros(1, dtype=torch.long, device=accelerator.device)
-    running_sum_loss = torch.zeros(1, dtype=torch.float32, device=accelerator.device)
-    projector_params = list(
-        accelerator.unwrap_model(model).multi_modal_projector.parameters()
-    )
-    mean_loss = float("nan")
-    mean_loss_tensor = torch.zeros(1, dtype=torch.float32, device=accelerator.device)
 
-    for epoch in range(starting_epoch, int(cfg["epochs"])):
-        train_sampler.set_epoch(epoch)
+    def set_train_mode() -> None:
         accelerator.unwrap_model(model).multi_modal_projector.train()
 
-        for batch_idx, batch in enumerate(train_loader):
-            if epoch == starting_epoch and batch_idx < batches_to_skip:
-                continue
+    def trainable_parameters():
+        return accelerator.unwrap_model(model).multi_modal_projector.parameters()
 
-            with accelerator.accumulate(model):
-                with accelerator.autocast():
-                    outputs = model(**batch)
-                n_tokens = (batch["labels"] != -100).sum()
-                loss = outputs.loss * n_tokens.float()
-                accelerator.backward(loss)
-                running_token_count += n_tokens
-                running_sum_loss += outputs.loss.detach().float() * n_tokens.float()
+    def save_checkpoint(global_step: int, *, eval_loss: float | None = None) -> Path:
+        ckpt_path = output_dir / f"checkpoint-{global_step}"
+        is_best = eval_loss is not None and (state.best_eval_loss is None or eval_loss < state.best_eval_loss)
+        if is_best:
+            state.best_eval_loss = eval_loss
+        save_training_checkpoint(
+            path=ckpt_path,
+            model=accelerator.unwrap_model(model),
+            processor=collator.processor,
+            tokenizer=collator.tokenizer,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            training_config=cfg,
+            trainer_state={
+                "global_step": global_step,
+                "epoch": state.epoch,
+                "best_eval_loss": state.best_eval_loss,
+                "save_best_by": cfg.get("save_best_by", "eval_loss"),
+            },
+            stage="caption_pretrain",
+            save_language_model=False,
+        )
+        update_checkpoint_pointer(output_dir, "last", ckpt_path, step=global_step)
+        if is_best:
+            update_checkpoint_pointer(
+                output_dir,
+                "best",
+                ckpt_path,
+                step=global_step,
+                metric_name="eval_loss",
+                metric_value=eval_loss,
+            )
+        rotate_checkpoints(output_dir, int(cfg["keep_last_n"]))
+        return ckpt_path
 
-                if accelerator.sync_gradients:
-                    total_tokens = (
-                        accelerator.gather(running_token_count).sum().clamp(min=1).float()
-                    )
-                    # DDP all-reduce already averages grads across N ranks, so the
-                    # effective denominator must be (total_tokens / N) to recover
-                    # sum_token_grads / total_tokens.
-                    grad_denom = total_tokens / accelerator.num_processes
-                    for p in projector_params:
-                        if p.grad is not None:
-                            p.grad.div_(grad_denom)
-                    accelerator.clip_grad_norm_(projector_params, 1.0)
-                    mean_loss_tensor = (
-                        accelerator.gather(running_sum_loss).sum() / total_tokens
-                    ).detach()
-                    running_token_count.zero_()
-                    running_sum_loss.zero_()
+    def on_step_end(result, training_state) -> None:
+        if progress is not None:
+            progress.update(1)
+            progress.set_postfix(
+                train_loss=f"{result.train_loss:.6f}",
+                lr=f"{_current_lr(scheduler, optimizer):.3e}",
+                supervised_tokens=result.supervised_tokens,
+            )
 
-                optimizer.step()
-                if accelerator.sync_gradients:
-                    scheduler.step()
-                optimizer.zero_grad(set_to_none=True)
+        if result.global_step % int(cfg["log_steps"]) == 0:
+            logger.info(
+                "step {}: train_loss={:.6f}, lr={:.6e}, supervised_tokens={}",
+                result.global_step,
+                result.train_loss,
+                _current_lr(scheduler, optimizer),
+                result.supervised_tokens,
+            )
+            if accelerator.is_main_process:
+                append_jsonl(metrics_path, {"step": result.global_step, "train_loss": result.train_loss})
 
-            if not accelerator.sync_gradients:
-                continue
+        eval_loss = None
+        if result.global_step % int(cfg["eval_steps"]) == 0:
+            eval_loss = run_evaluation(
+                model=model,
+                eval_loader=eval_loader,
+                accelerator=accelerator,
+                global_step=result.global_step,
+                logger=logger,
+                sample_logger=lambda m, a: _log_eval_samples(m, collator, eval_samples, a, 64),
+                restore_train_mode=set_train_mode,
+            )
+            if accelerator.is_main_process:
+                append_jsonl(metrics_path, {"step": result.global_step, "eval_loss": eval_loss})
 
-            global_step += 1
+        if result.global_step % int(cfg["save_steps"]) == 0 and accelerator.is_main_process:
+            ckpt_path = save_checkpoint(result.global_step, eval_loss=eval_loss)
+            logger.info("Saved checkpoint to {}.", ckpt_path)
 
-            if global_step % int(cfg["log_steps"]) == 0:
-                mean_loss = mean_loss_tensor.item()
-                log_message(
-                    f"step {global_step}: train_loss={mean_loss:.6f}",
-                    accelerator,
-                    log_path,
-                )
-                if accelerator.is_main_process:
-                    append_jsonl(
-                        metrics_path, {"step": global_step, "train_loss": mean_loss}
-                    )
-
-            if global_step % int(cfg["eval_steps"]) == 0:
-                eval_loss, scale_stats = evaluate(
-                    model,
-                    eval_loader,
-                    accelerator,
-                    eval_samples,
-                    collator,
-                    64,
-                    global_step,
-                    log_path,
-                )
-                if accelerator.is_main_process:
-                    metrics = {"step": global_step, "eval_loss": eval_loss}
-                    if scale_stats is not None:
-                        metrics.update({f"projector_{k}": v for k, v in scale_stats.items()})
-                    append_jsonl(metrics_path, metrics)
-
-            if (
-                global_step % int(cfg["save_steps"]) == 0
-                and accelerator.is_main_process
-            ):
-                ckpt_path = output_dir / f"checkpoint-{global_step}.pt"
-                save_projector_ckpt(
-                    accelerator.unwrap_model(model),
-                    optimizer,
-                    scheduler,
-                    global_step,
-                    ckpt_path,
-                )
-                rotate_checkpoints(str(output_dir), int(cfg["keep_last_n"]))
-                log_message(f"Saved checkpoint to {ckpt_path}.", accelerator, log_path)
-
-        batches_to_skip = 0
+    run_training(
+        model=model,
+        train_loader=train_loader,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        accelerator=accelerator,
+        epochs=int(cfg["epochs"]),
+        grad_accum=grad_accum,
+        state=state,
+        set_train_mode=set_train_mode,
+        trainable_parameters=trainable_parameters,
+        on_step_end=on_step_end,
+    )
 
     if accelerator.is_main_process:
-        ckpt_path = output_dir / f"checkpoint-{global_step}.pt"
-        save_projector_ckpt(
-            accelerator.unwrap_model(model),
-            optimizer,
-            scheduler,
-            global_step,
-            ckpt_path,
-        )
-        rotate_checkpoints(str(output_dir), int(cfg["keep_last_n"]))
-        log_message(f"Saved final checkpoint to {ckpt_path}.", accelerator, log_path)
+        ckpt_path = save_checkpoint(state.global_step)
+        logger.info("Saved final checkpoint to {}.", ckpt_path)
+        if progress is not None:
+            progress.close()
 
-    log_message("Training finished.", accelerator, log_path)
+    logger.info("Training finished.")
 
 
 if __name__ == "__main__":
