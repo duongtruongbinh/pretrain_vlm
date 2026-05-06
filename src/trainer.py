@@ -4,7 +4,6 @@ import json
 from pathlib import Path
 
 import torch
-from accelerate import Accelerator
 from torch.utils.data import Sampler
 
 
@@ -68,13 +67,6 @@ def build_weighted_sampler(dataset, seed: int) -> EpochAwareWeightedSampler:
         num_samples=len(dataset),
         seed=seed,
     )
-
-
-def log_message(message: str, accelerator: Accelerator, log_path: Path) -> None:
-    accelerator.print(message)
-    if accelerator.is_main_process:
-        with log_path.open("a", encoding="utf-8") as fh:
-            fh.write(message + "\n")
 
 
 def append_jsonl(path: Path, record: dict) -> None:
