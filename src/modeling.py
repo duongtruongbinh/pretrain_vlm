@@ -193,10 +193,20 @@ def build_model(
     if len(tokenizer) != model.get_input_embeddings().num_embeddings:
         model.resize_token_embeddings(len(tokenizer))
 
+    _cast_runtime_dtypes(model, dtype, resolved_projector_dtype)
+    _configure_projector_post_norm(
+        model,
+        image_token_index=image_token_index,
+        projector_norm=projector_norm,
+        target_multiplier=projector_norm_target_multiplier,
+        trainable=projector_norm_trainable,
+        min_multiplier=projector_norm_min_multiplier,
+        max_multiplier=projector_norm_max_multiplier,
+        eps=projector_norm_eps,
+        projector_dtype=resolved_projector_dtype,
+    )
     if projector_state is not None:
         model.multi_modal_projector.load_state_dict(projector_state, strict=False)
-
-    _cast_runtime_dtypes(model, dtype, resolved_projector_dtype)
     _patch_projector_input_dtype(model.multi_modal_projector)
 
     return model
@@ -317,15 +327,6 @@ def _patch_projector_input_dtype(projector) -> None:
     but cast inputs to the projector weight dtype before the linear layers.
     """
 
-    if not hasattr(projector, "post_norm"):
-        hidden_size = projector.linear_2.out_features
-        projector.post_norm = torch.nn.LayerNorm(hidden_size)
-
-    projector.post_norm.to(
-        device=projector.linear_2.weight.device,
-        dtype=projector.linear_2.weight.dtype,
-    )
-
     def forward(self, image_features):
         projector_dtype = self.linear_1.weight.dtype
         if image_features.dtype != projector_dtype:
@@ -333,7 +334,9 @@ def _patch_projector_input_dtype(projector) -> None:
         hidden_states = self.linear_1(image_features)
         hidden_states = self.act(hidden_states)
         hidden_states = self.linear_2(hidden_states)
-        hidden_states = self.post_norm(hidden_states)
+        post_norm = getattr(self, "post_projector_norm", None)
+        if post_norm is not None:
+            hidden_states = post_norm(hidden_states)
         return hidden_states
 
     projector.forward = MethodType(forward, projector)
@@ -362,4 +365,3 @@ def _load_llm_weights(
     model.language_model.load_state_dict(llm.model.state_dict(), strict=True)
     model.lm_head.load_state_dict(llm.lm_head.state_dict(), strict=True)
     del llm
-
