@@ -8,14 +8,20 @@ from accelerate import Accelerator
 from PIL import Image
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
 from transformers import Adafactor, get_cosine_schedule_with_warmup
 
-from src.config import load_config
-from src.instruction_collator import InstructionCollator
-from src.instruction_dataset import ImageInstructionDataset
-from src.model import build_model, freeze_components, set_component_modes
-from src.paths import resolve_config_path
-from src.trainer import EpochShuffleSampler, append_jsonl, log_message
+from src.collators import InstructionCollator
+from src.data import ImageInstructionDataset
+from src.modeling import build_model, freeze_components, set_component_modes
+from src.runtime import (
+    EpochShuffleSampler,
+    append_jsonl,
+    load_config,
+    resolve_config_path,
+    set_seed,
+    setup_logger,
+)
 from src.training.checkpoint import (
     load_full_checkpoint,
     load_projector_checkpoint,
@@ -25,7 +31,6 @@ from src.training.checkpoint import (
 )
 from src.training.engine import TrainingState, compute_steps_per_epoch, run_training
 from src.training.eval import run_evaluation
-from src.utils import set_seed
 
 
 def _parse_args() -> argparse.Namespace:
@@ -122,7 +127,6 @@ def _log_eval_samples(model, collator, eval_samples, accelerator, max_new_tokens
                 img = img.convert("RGB")
         except Exception as e:
             line = f"[sample {idx}] failed: {e}"
-            accelerator.print(line)
             lines.append(line)
             continue
 
@@ -152,9 +156,15 @@ def _log_eval_samples(model, collator, eval_samples, accelerator, max_new_tokens
             f"[sample {idx}] prediction_raw: {raw_generated_text or '<empty>'}",
             f"[sample {idx}] reference: {sample['messages'][-1]['content']}",
         ]:
-            accelerator.print(line)
             lines.append(line)
     return lines
+
+
+def _current_lr(scheduler, optimizer) -> float:
+    try:
+        return float(scheduler.get_last_lr()[0])
+    except Exception:
+        return float(optimizer.param_groups[0]["lr"])
 
 
 def main() -> None:
@@ -162,7 +172,6 @@ def main() -> None:
     cfg = load_config("instruction_train")
     output_dir = Path(cfg["output_dir"]).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    log_path = output_dir / "train_instruction.log"
     metrics_path = output_dir / "metrics.jsonl"
 
     resume_dir = Path(args.resume_from).expanduser().resolve() if args.resume_from else None
@@ -174,6 +183,7 @@ def main() -> None:
     accelerator = Accelerator(
         gradient_accumulation_steps=int(cfg["grad_accum"]), mixed_precision=mixed_precision
     )
+    logger = setup_logger(output_dir, accelerator)
     set_seed(int(cfg["seed"]))
 
     llm_source, tokenizer_source = _resolve_resume_sources(resume_dir, cfg["llm_model"])
@@ -244,11 +254,18 @@ def main() -> None:
         state.global_step = int(resume_state.get("global_step", 0))
         state.best_eval_loss = resume_state.get("best_eval_loss")
 
-    log_message(f"[check] train={len(train_dataset)} eval={len(eval_dataset)}", accelerator, log_path)
+    logger.info("[check] train={} eval={}", len(train_dataset), len(eval_dataset))
     if stage1_step is not None:
-        log_message(f"[check] warm-started projector from stage-1 step {stage1_step}", accelerator, log_path)
+        logger.info("[check] warm-started projector from stage-1 step {}", stage1_step)
     if resume_dir:
-        log_message(f"[check] resumed from {resume_dir} at step {state.global_step}", accelerator, log_path)
+        logger.info("[check] resumed from {} at step {}", resume_dir, state.global_step)
+
+    progress_total = max(total_steps - state.global_step, 0)
+    progress = (
+        tqdm(total=progress_total, initial=0, desc="instruction", dynamic_ncols=True)
+        if accelerator.is_main_process
+        else None
+    )
 
     def set_train_mode() -> None:
         set_component_modes(accelerator.unwrap_model(model), **component_modes)
@@ -295,9 +312,21 @@ def main() -> None:
         train_sampler.set_epoch(epoch)
 
     def on_step_end(result, training_state) -> None:
+        if progress is not None:
+            progress.update(1)
+            progress.set_postfix(
+                train_loss=f"{result.train_loss:.6f}",
+                lr=f"{_current_lr(scheduler, optimizer):.3e}",
+                supervised_tokens=result.supervised_tokens,
+            )
+
         if result.global_step % int(cfg["log_steps"]) == 0:
-            log_message(
-                f"step {result.global_step}: train_loss={result.train_loss:.6f}", accelerator, log_path
+            logger.info(
+                "step {}: train_loss={:.6f}, lr={:.6e}, supervised_tokens={}",
+                result.global_step,
+                result.train_loss,
+                _current_lr(scheduler, optimizer),
+                result.supervised_tokens,
             )
             if accelerator.is_main_process:
                 append_jsonl(metrics_path, {"step": result.global_step, "train_loss": result.train_loss})
@@ -309,7 +338,7 @@ def main() -> None:
                 eval_loader=eval_loader,
                 accelerator=accelerator,
                 global_step=result.global_step,
-                log_path=log_path,
+                logger=logger,
                 sample_logger=lambda m, a: _log_eval_samples(
                     m, collator, eval_samples, a, int(cfg["max_new_tokens"])
                 ),
@@ -320,7 +349,7 @@ def main() -> None:
 
         if result.global_step % int(cfg["save_steps"]) == 0 and accelerator.is_main_process:
             ckpt_path = save_checkpoint(result.global_step, eval_loss=eval_loss)
-            log_message(f"[check] saved checkpoint to {ckpt_path}", accelerator, log_path)
+            logger.info("[check] saved checkpoint to {}", ckpt_path)
 
     run_training(
         model=model,
@@ -339,9 +368,11 @@ def main() -> None:
 
     if accelerator.is_main_process:
         ckpt_path = save_checkpoint(state.global_step)
-        log_message(f"[check] saved final instruction checkpoint to {ckpt_path}", accelerator, log_path)
+        logger.info("[check] saved final instruction checkpoint to {}", ckpt_path)
+        if progress is not None:
+            progress.close()
 
-    log_message("Instruction finetuning finished.", accelerator, log_path)
+    logger.info("Instruction finetuning finished.")
 
 
 if __name__ == "__main__":

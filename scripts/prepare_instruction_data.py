@@ -11,7 +11,7 @@ from datasets import Image as HfImage
 from datasets import load_dataset
 from PIL import Image
 
-from src.config import load_config
+from src.runtime import load_config
 
 
 IMAGE_FIELD_CANDIDATES = ("image", "Image", "img")

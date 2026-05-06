@@ -8,7 +8,7 @@ from pathlib import Path
 
 import gdown
 
-from src.config import load_config
+from src.runtime import load_config
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}

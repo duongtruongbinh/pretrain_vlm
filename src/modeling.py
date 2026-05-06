@@ -1,3 +1,5 @@
+"""Model/processor construction utilities for LLaVA-style VLM training."""
+
 from __future__ import annotations
 
 from types import MethodType
@@ -32,6 +34,7 @@ def build_processor(vision_model_name: str, llm_model_name: str) -> LlavaProcess
     one token while the model expects num_patches tokens — causing a runtime
     shape mismatch in _merge_input_ids_with_image_features.
     """
+
     vision_root_config = AutoConfig.from_pretrained(vision_model_name)
     vision_config = getattr(vision_root_config, "vision_config", vision_root_config)
     patch_size = vision_config.patch_size  # 16 for siglip2-so400m-patch16-384
@@ -69,8 +72,9 @@ def build_model(
     Note: build_processor() must be called with the same vision_model_name and
     llm_model_name so the processor's patch_size matches the model's vision config.
     """
+
     dtype = _resolve_dtype(model_dtype)
-    projector_dtype = _resolve_dtype(projector_dtype) or torch.float32
+    resolved_projector_dtype = _resolve_dtype(projector_dtype) or torch.float32
 
     # Use build_processor to resolve patch_size and token IDs consistently.
     processor = build_processor(vision_model_name, tokenizer_name_or_path or llm_model_name)
@@ -104,7 +108,7 @@ def build_model(
     if projector_state is not None:
         model.multi_modal_projector.load_state_dict(projector_state)
 
-    _cast_runtime_dtypes(model, dtype, projector_dtype)
+    _cast_runtime_dtypes(model, dtype, resolved_projector_dtype)
     _patch_projector_input_dtype(model.multi_modal_projector)
 
     return model
@@ -113,6 +117,8 @@ def build_model(
 def freeze_components(
     model: LlavaForConditionalGeneration, freeze_vision: bool, train_projector: bool, train_llm: bool
 ) -> None:
+    """Enable/disable gradients for each major model component."""
+
     model.vision_tower.requires_grad_(not freeze_vision)
     model.multi_modal_projector.requires_grad_(train_projector)
     model.language_model.requires_grad_(train_llm)
@@ -124,15 +130,12 @@ def freeze_components(
 def set_component_modes(
     model: LlavaForConditionalGeneration, freeze_vision: bool, train_projector: bool, train_llm: bool
 ) -> None:
+    """Set `.train()` modes for each major model component."""
+
     model.vision_tower.train(not freeze_vision)
     model.multi_modal_projector.train(train_projector)
     model.language_model.train(train_llm)
     model.lm_head.train(train_llm)
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
 
 
 def _resolve_dtype(dtype_name: str | None) -> torch.dtype | None:
@@ -173,6 +176,15 @@ def _patch_projector_input_dtype(projector) -> None:
     but cast inputs to the projector weight dtype before the linear layers.
     """
 
+    if not hasattr(projector, "post_norm"):
+        hidden_size = projector.linear_2.out_features
+        projector.post_norm = torch.nn.LayerNorm(hidden_size)
+
+    projector.post_norm.to(
+        device=projector.linear_2.weight.device,
+        dtype=projector.linear_2.weight.dtype,
+    )
+
     def forward(self, image_features):
         projector_dtype = self.linear_1.weight.dtype
         if image_features.dtype != projector_dtype:
@@ -180,6 +192,7 @@ def _patch_projector_input_dtype(projector) -> None:
         hidden_states = self.linear_1(image_features)
         hidden_states = self.act(hidden_states)
         hidden_states = self.linear_2(hidden_states)
+        hidden_states = self.post_norm(hidden_states)
         return hidden_states
 
     projector.forward = MethodType(forward, projector)
@@ -208,3 +221,4 @@ def _load_llm_weights(
     model.language_model.load_state_dict(llm.model.state_dict(), strict=True)
     model.lm_head.load_state_dict(llm.lm_head.state_dict(), strict=True)
     del llm
+

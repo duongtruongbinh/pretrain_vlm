@@ -1,11 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from pathlib import Path
 
 import torch
-
-from src.trainer import log_message
 
 
 SampleLogger = Callable[[object, object], list[str]]
@@ -33,7 +30,7 @@ def run_evaluation(
     eval_loader,
     accelerator,
     global_step: int,
-    log_path: Path,
+    logger,
     sample_logger: SampleLogger | None = None,
     restore_train_mode: ModeCallback | None = None,
 ) -> float:
@@ -41,14 +38,12 @@ def run_evaluation(
 
     accelerator.unwrap_model(model).eval()
     eval_loss = evaluate_loss(model, eval_loader, accelerator)
-    log_message(f"step {global_step}: eval_loss={eval_loss:.6f}", accelerator, log_path)
+    logger.info("step {}: eval_loss={:.6f}", global_step, eval_loss)
 
-    if sample_logger is not None:
+    if sample_logger is not None and accelerator.is_main_process:
         lines = sample_logger(model, accelerator)
-        if accelerator.is_main_process:
-            with log_path.open("a", encoding="utf-8") as fh:
-                for line in lines:
-                    fh.write(line + "\n")
+        for line in lines:
+            logger.info(line)
 
     if restore_train_mode is not None:
         restore_train_mode()

@@ -14,7 +14,7 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.config import load_config  # noqa: E402
+from src.runtime import load_config
 
 
 def parse_args() -> argparse.Namespace:
