@@ -21,11 +21,7 @@ def resolve_record_image_path(image_value: str | Path, *, jsonl_path: Path) -> s
     if raw_path.is_absolute():
         return str(raw_path)
 
-    candidates = (
-        PROJECT_ROOT / raw_path,
-        Path.cwd() / raw_path,
-        jsonl_path.parent / raw_path,
-    )
+    candidates = (PROJECT_ROOT / raw_path, Path.cwd() / raw_path, jsonl_path.parent / raw_path)
     for candidate in candidates:
         if candidate.exists():
             return str(candidate.resolve())

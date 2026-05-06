@@ -29,12 +29,9 @@ class ImageCaptionDataset(Dataset):
                     record = json.loads(line)
                     if "image" not in record or "caption" not in record:
                         raise ValueError(
-                            f"Each JSONL line must contain 'image' and 'caption'. "
-                            f"Bad line {line_number} in {p}."
+                            f"Each JSONL line must contain 'image' and 'caption'. Bad line {line_number} in {p}."
                         )
-                    record["image"] = resolve_record_image_path(
-                        record["image"], jsonl_path=p
-                    )
+                    record["image"] = resolve_record_image_path(record["image"], jsonl_path=p)
                     self.records.append(record)
                     self.source_indices.append(source_idx)
 

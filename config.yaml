@@ -1,6 +1,6 @@
 prepare_data:
-  raw_dir: /home/docs/nhantd/LLAVA/data/uit-openviic-raw
-  output_dir: /home/docs/nhantd/LLAVA/data/uit-openviic
+  raw_dir: data/uit-openviic-raw
+  output_dir: data/uit-openviic
   download:
     enabled: true
     images:
@@ -20,7 +20,7 @@ prepare_data:
 prepare_coco:
   dataset_name: DavidPhilips/coco2017
   dataset_config: default
-  output_dir: /home/docs/nhantd/LLAVA/data/coco2017
+  output_dir: data/coco2017
   split_map:
     train: train
     validation: val
@@ -34,12 +34,12 @@ prepare_coco:
 
 train:
   train_jsonl:
-    - /home/docs/nhantd/LLAVA/data/coco2017/train.jsonl
-    - /home/docs/nhantd/LLAVA/data/uit-openviic/train.jsonl
+    - data/coco2017/train.jsonl
+    - data/uit-openviic/train.jsonl
   eval_jsonl:
-    - /home/docs/nhantd/LLAVA/data/coco2017/val.jsonl
-    - /home/docs/nhantd/LLAVA/data/uit-openviic/val.jsonl
-  output_dir: /home/docs/nhantd/LLAVA/outputs/stage_1_projector_coco_uit_balanced_fp32_lr1e4_final
+    - data/coco2017/val.jsonl
+    - data/uit-openviic/val.jsonl
+  output_dir: outputs/stage_1_projector_coco_uit_balanced_fp32_lr1e4_final
   vision_model: google/siglip2-so400m-patch16-384
   llm_model: meta-llama/Llama-3.2-1B-Instruct
   epochs: 2
@@ -52,8 +52,8 @@ train:
   eval_steps: 1000
   save_steps: 500
   keep_last_n: 3
+  save_best_by: eval_loss
   seed: 42
-  resume_from: null
   model_dtype: bfloat16
   projector_dtype: float32
 
@@ -102,6 +102,6 @@ instruction_train:
   eval_steps: 200
   save_steps: 500
   keep_last_n: 3
-  max_new_tokens: 256
+  save_best_by: eval_loss
+  max_new_tokens: 1536
   seed: 42
-  resume_from: /home/docs/nhantd/vlm_pretrain/outputs/instruction_run1/checkpoint-13500

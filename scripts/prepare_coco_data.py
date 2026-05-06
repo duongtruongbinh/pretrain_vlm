@@ -89,15 +89,9 @@ def prepare_split(config: dict, hf_split: str, local_split: str, output_dir: Pat
         return
 
     print(
-        f"[coco] loading {dataset_name} config={dataset_config or 'default'} split={hf_split} "
-        f"streaming={streaming}"
+        f"[coco] loading {dataset_name} config={dataset_config or 'default'} split={hf_split} streaming={streaming}"
     )
-    dataset = load_dataset(
-        dataset_name,
-        dataset_config,
-        split=hf_split,
-        streaming=streaming,
-    )
+    dataset = load_dataset(dataset_name, dataset_config, split=hf_split, streaming=streaming)
 
     images_dir = output_dir / "images" / local_split
     stats = Counter()
