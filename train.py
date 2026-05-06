@@ -36,6 +36,7 @@ def _parse_args() -> argparse.Namespace:
     """Parse runtime-only arguments that should not live in config.yaml."""
 
     parser = argparse.ArgumentParser(description="Caption projector pretraining.")
+    parser.add_argument("--config-section", type=str, default="train")
     parser.add_argument("--resume-from", type=str, default=None)
     return parser.parse_args()
 
@@ -116,7 +117,7 @@ def _current_lr(scheduler, optimizer) -> float:
 
 def main() -> None:
     args = _parse_args()
-    cfg = load_config("train")
+    cfg = load_config(args.config_section)
     output_dir = Path(cfg["output_dir"]).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     metrics_path = output_dir / "metrics.jsonl"
