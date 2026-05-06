@@ -45,9 +45,15 @@ def save_projector_ckpt(
 def load_projector_ckpt(path: str | Path, model, optimizer=None, scheduler=None) -> int:
     ckpt = torch.load(str(path), map_location="cpu")
     state = _remap_projector_state(ckpt["projector_state_dict"])
-    model.multi_modal_projector.load_state_dict(state)
+    model.multi_modal_projector.load_state_dict(state, strict=False)
     if optimizer is not None:
-        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        try:
+            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        except ValueError as error:
+            print(
+                "[checkpoint][warn] skipped optimizer state because the "
+                f"projector parameter set changed: {error}"
+            )
     if scheduler is not None:
         scheduler.load_state_dict(ckpt["scheduler_state_dict"])
     return int(ckpt["step"])
@@ -76,12 +82,18 @@ def load_full_ckpt(path: str | Path, model, optimizer=None, scheduler=None) -> i
     raw = torch.load(d / "projector.pt", map_location="cpu")
     raw_state = raw["projector_state_dict"] if "projector_state_dict" in raw else raw
     state = _remap_projector_state(raw_state)
-    model.multi_modal_projector.load_state_dict(state)
+    model.multi_modal_projector.load_state_dict(state, strict=False)
     lm_head_path = d / "lm_head.pt"
     if lm_head_path.exists():
         model.lm_head.load_state_dict(torch.load(lm_head_path, map_location="cpu"))
     if optimizer is not None and (d / "optimizer.pt").exists():
-        optimizer.load_state_dict(torch.load(d / "optimizer.pt", map_location="cpu"))
+        try:
+            optimizer.load_state_dict(torch.load(d / "optimizer.pt", map_location="cpu"))
+        except ValueError as error:
+            print(
+                "[checkpoint][warn] skipped optimizer state because the "
+                f"parameter set changed: {error}"
+            )
     if scheduler is not None and (d / "scheduler.pt").exists():
         scheduler.load_state_dict(torch.load(d / "scheduler.pt", map_location="cpu"))
     trainer_state_path = d / "trainer_state.json"

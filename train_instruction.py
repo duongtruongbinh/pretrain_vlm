@@ -265,6 +265,14 @@ def main() -> None:
         tokenizer_name_or_path=tokenizer_source,
         model_dtype=cfg.get("model_dtype"),
         projector_dtype=cfg.get("projector_dtype", "float32"),
+        projector_norm=cfg.get("projector_norm"),
+        projector_norm_target_multiplier=float(
+            cfg.get("projector_norm_target_multiplier", 3.0)
+        ),
+        projector_norm_trainable=bool(cfg.get("projector_norm_trainable", True)),
+        projector_norm_min_multiplier=cfg.get("projector_norm_min_multiplier", 1.0),
+        projector_norm_max_multiplier=cfg.get("projector_norm_max_multiplier", 10.0),
+        projector_norm_eps=float(cfg.get("projector_norm_eps", 1e-6)),
     )
     freeze_components(
         model,

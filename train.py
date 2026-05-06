@@ -104,6 +104,88 @@ def _log_eval_samples(
     return lines
 
 
+def _tensor_stats(values: torch.Tensor) -> dict[str, float]:
+    flat = values.detach().float().reshape(-1, values.shape[-1])
+    token_norm = flat.norm(dim=-1)
+    return {
+        "std": float(flat.std().cpu()),
+        "token_norm": float(token_norm.mean().cpu()),
+    }
+
+
+def _projector_scale_stats(model, collator, sample: dict, accelerator) -> dict[str, float] | None:
+    unwrapped = accelerator.unwrap_model(model)
+    tokenizer = collator.processor.tokenizer
+
+    try:
+        with Image.open(sample["image"]) as img:
+            image = img.convert("RGB")
+    except Exception:
+        return None
+
+    black_image = Image.new("RGB", image.size, (0, 0, 0))
+    vision_dtype = next(unwrapped.vision_tower.parameters()).dtype
+    image_token_id = tokenizer.convert_tokens_to_ids("<image>")
+
+    def encode(image_obj):
+        inputs = collator.processor(
+            text=PROMPT_TEMPLATE, images=image_obj, return_tensors="pt"
+        )
+        input_ids = inputs["input_ids"].to(accelerator.device)
+        pixel_values = inputs["pixel_values"].to(
+            device=accelerator.device, dtype=vision_dtype
+        )
+        vision_outputs = unwrapped.vision_tower(
+            pixel_values=pixel_values,
+            output_hidden_states=True,
+            return_dict=True,
+        )
+        feature_layer = unwrapped.config.vision_feature_layer
+        select_strategy = unwrapped.config.vision_feature_select_strategy
+        if isinstance(feature_layer, int):
+            selected_features = vision_outputs.hidden_states[feature_layer]
+            if select_strategy == "default":
+                selected_features = selected_features[:, 1:]
+        else:
+            hidden_states = [vision_outputs.hidden_states[idx] for idx in feature_layer]
+            if select_strategy == "default":
+                hidden_states = [state[:, 1:] for state in hidden_states]
+            selected_features = torch.cat(hidden_states, dim=-1)
+
+        image_features = unwrapped.multi_modal_projector(selected_features)
+        text_mask = input_ids != image_token_id
+        if tokenizer.pad_token_id is not None:
+            text_mask = text_mask & (input_ids != tokenizer.pad_token_id)
+        text_embeds = unwrapped.get_input_embeddings()(input_ids)[text_mask]
+        return image_features, text_embeds
+
+    with torch.no_grad():
+        real_features, text_embeds = encode(image)
+        black_features, _ = encode(black_image)
+
+    real_stats = _tensor_stats(real_features)
+    black_stats = _tensor_stats(black_features)
+    text_stats = _tensor_stats(text_embeds)
+    real_black_cosine = torch.nn.functional.cosine_similarity(
+        real_features.detach().float().flatten(1),
+        black_features.detach().float().flatten(1),
+        dim=-1,
+    ).mean()
+    return {
+        "real_norm": real_stats["token_norm"],
+        "black_norm": black_stats["token_norm"],
+        "text_norm": text_stats["token_norm"],
+        "real_std": real_stats["std"],
+        "black_std": black_stats["std"],
+        "text_std": text_stats["std"],
+        "real_norm_ratio": real_stats["token_norm"]
+        / max(text_stats["token_norm"], 1e-12),
+        "black_norm_ratio": black_stats["token_norm"]
+        / max(text_stats["token_norm"], 1e-12),
+        "real_black_cosine": float(real_black_cosine.cpu()),
+    }
+
+
 def evaluate(
     model,
     eval_loader,
@@ -121,13 +203,28 @@ def evaluate(
     lines = _log_eval_samples(
         model, collator, eval_samples, accelerator, max_new_tokens, log_path
     )
+    scale_stats = None
+    if eval_samples and accelerator.is_main_process:
+        scale_stats = _projector_scale_stats(model, collator, eval_samples[0], accelerator)
+        if scale_stats is not None:
+            log_message(
+                "Projector scale: "
+                f"real_norm={scale_stats['real_norm']:.3f}, "
+                f"black_norm={scale_stats['black_norm']:.3f}, "
+                f"text_norm={scale_stats['text_norm']:.3f}, "
+                f"real_ratio={scale_stats['real_norm_ratio']:.1f}x, "
+                f"black_ratio={scale_stats['black_norm_ratio']:.1f}x, "
+                f"real_black_cosine={scale_stats['real_black_cosine']:.4f}",
+                accelerator,
+                log_path,
+            )
     if accelerator.is_main_process:
         with log_path.open("a", encoding="utf-8") as fh:
             for line in lines:
                 fh.write(line + "\n")
 
     accelerator.unwrap_model(model).multi_modal_projector.train()
-    return eval_loss
+    return eval_loss, scale_stats
 
 
 def main() -> None:
@@ -166,6 +263,14 @@ def main() -> None:
         cfg["llm_model"],
         model_dtype=cfg.get("model_dtype"),
         projector_dtype=cfg.get("projector_dtype", "float32"),
+        projector_norm=cfg.get("projector_norm"),
+        projector_norm_target_multiplier=float(
+            cfg.get("projector_norm_target_multiplier", 3.0)
+        ),
+        projector_norm_trainable=bool(cfg.get("projector_norm_trainable", True)),
+        projector_norm_min_multiplier=cfg.get("projector_norm_min_multiplier", 1.0),
+        projector_norm_max_multiplier=cfg.get("projector_norm_max_multiplier", 10.0),
+        projector_norm_eps=float(cfg.get("projector_norm_eps", 1e-6)),
     )
     freeze_components(model, freeze_vision=True, train_projector=True, train_llm=False)
 
@@ -218,6 +323,16 @@ def main() -> None:
         f"vision={next(accelerator.unwrap_model(model).vision_tower.parameters()).dtype}, "
         f"llm={next(accelerator.unwrap_model(model).language_model.parameters()).dtype}, "
         f"projector={next(accelerator.unwrap_model(model).multi_modal_projector.parameters()).dtype}",
+        accelerator,
+        log_path,
+    )
+    log_message(
+        "Projector norm: "
+        f"type={cfg.get('projector_norm', 'none')}, "
+        f"target_multiplier={cfg.get('projector_norm_target_multiplier', 'n/a')}, "
+        f"trainable={cfg.get('projector_norm_trainable', False)}, "
+        f"clamp=[{cfg.get('projector_norm_min_multiplier', 'none')}, "
+        f"{cfg.get('projector_norm_max_multiplier', 'none')}]",
         accelerator,
         log_path,
     )
@@ -295,7 +410,7 @@ def main() -> None:
                     )
 
             if global_step % int(cfg["eval_steps"]) == 0:
-                eval_loss = evaluate(
+                eval_loss, scale_stats = evaluate(
                     model,
                     eval_loader,
                     accelerator,
@@ -306,9 +421,10 @@ def main() -> None:
                     log_path,
                 )
                 if accelerator.is_main_process:
-                    append_jsonl(
-                        metrics_path, {"step": global_step, "eval_loss": eval_loss}
-                    )
+                    metrics = {"step": global_step, "eval_loss": eval_loss}
+                    if scale_stats is not None:
+                        metrics.update({f"projector_{k}": v for k, v in scale_stats.items()})
+                    append_jsonl(metrics_path, metrics)
 
             if (
                 global_step % int(cfg["save_steps"]) == 0

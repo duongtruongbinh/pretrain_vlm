@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import math
 from types import MethodType
 
 import torch
+from torch import nn
 from transformers import (
     AutoConfig,
     AutoImageProcessor,
@@ -19,6 +21,86 @@ IMAGE_TOKEN = "<image>"
 # LlavaConfig and LlavaProcessor so they never drift apart.
 _VISION_FEATURE_SELECT_STRATEGY = "full"
 DEFAULT_PROJECTOR_DTYPE = "float32"
+
+
+class PostProjectorRMSNorm(nn.Module):
+    """
+    RMS-normalize projected visual tokens and put them near LLM text scale.
+
+    Llama-family text embeddings have very small token norms (~1). A standard
+    RMSNorm/LayerNorm with weight=1 would produce token norm around sqrt(D),
+    which is still far above the text embedding scale. Initialize the RMSNorm
+    weight so the output token norm starts at
+    target_norm_multiplier * mean_text_embedding_norm.
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        text_embedding_norm: float,
+        target_norm_multiplier: float = 3.0,
+        eps: float = 1e-6,
+        trainable: bool = True,
+        min_norm_multiplier: float | None = 1.0,
+        max_norm_multiplier: float | None = 10.0,
+    ) -> None:
+        super().__init__()
+        self.hidden_size = int(hidden_size)
+        self.eps = float(eps)
+        self.trainable = bool(trainable)
+
+        text_embedding_norm = float(text_embedding_norm)
+        target_norm_multiplier = float(target_norm_multiplier)
+        init_scale = target_norm_multiplier * text_embedding_norm / math.sqrt(
+            self.hidden_size
+        )
+        initial_weight = torch.full((self.hidden_size,), init_scale, dtype=torch.float32)
+        if trainable:
+            self.weight = nn.Parameter(initial_weight)
+        else:
+            self.register_buffer("weight", initial_weight)
+
+        min_scale = (
+            None
+            if min_norm_multiplier is None
+            else float(min_norm_multiplier) * text_embedding_norm / math.sqrt(self.hidden_size)
+        )
+        max_scale = (
+            None
+            if max_norm_multiplier is None
+            else float(max_norm_multiplier) * text_embedding_norm / math.sqrt(self.hidden_size)
+        )
+        self.register_buffer(
+            "text_embedding_norm",
+            torch.tensor(text_embedding_norm, dtype=torch.float32),
+        )
+        self.register_buffer(
+            "target_norm_multiplier",
+            torch.tensor(target_norm_multiplier, dtype=torch.float32),
+        )
+        self.register_buffer(
+            "min_scale",
+            torch.tensor(float("nan") if min_scale is None else min_scale, dtype=torch.float32),
+        )
+        self.register_buffer(
+            "max_scale",
+            torch.tensor(float("nan") if max_scale is None else max_scale, dtype=torch.float32),
+        )
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        input_dtype = hidden_states.dtype
+        x = hidden_states.float()
+        rms = x.pow(2).mean(dim=-1, keepdim=True).add(self.eps).rsqrt()
+
+        weight = self.weight.float()
+        min_scale = float(self.min_scale.item())
+        max_scale = float(self.max_scale.item())
+        if not math.isnan(min_scale) or not math.isnan(max_scale):
+            lower = None if math.isnan(min_scale) else min_scale
+            upper = None if math.isnan(max_scale) else max_scale
+            weight = weight.clamp(min=lower, max=upper)
+
+        return (x * rms * weight).to(input_dtype)
 
 
 def build_processor(vision_model_name: str, llm_model_name: str) -> LlavaProcessor:
@@ -56,6 +138,12 @@ def build_model(
     tokenizer_name_or_path: str | None = None,
     model_dtype: str | None = None,
     projector_dtype: str | None = DEFAULT_PROJECTOR_DTYPE,
+    projector_norm: str | None = None,
+    projector_norm_target_multiplier: float = 3.0,
+    projector_norm_trainable: bool = True,
+    projector_norm_min_multiplier: float | None = 1.0,
+    projector_norm_max_multiplier: float | None = 10.0,
+    projector_norm_eps: float = 1e-6,
     projector_state: dict | None = None,
 ) -> LlavaForConditionalGeneration:
     """
@@ -102,9 +190,20 @@ def build_model(
         model.resize_token_embeddings(len(tokenizer))
 
     if projector_state is not None:
-        model.multi_modal_projector.load_state_dict(projector_state)
+        model.multi_modal_projector.load_state_dict(projector_state, strict=False)
 
     _cast_runtime_dtypes(model, torch_dtype, projector_torch_dtype)
+    _configure_projector_post_norm(
+        model,
+        image_token_index=image_token_index,
+        projector_norm=projector_norm,
+        target_multiplier=float(projector_norm_target_multiplier),
+        trainable=bool(projector_norm_trainable),
+        min_multiplier=projector_norm_min_multiplier,
+        max_multiplier=projector_norm_max_multiplier,
+        eps=float(projector_norm_eps),
+        projector_dtype=projector_torch_dtype,
+    )
     _patch_projector_input_dtype(model.multi_modal_projector)
 
     return model
@@ -176,6 +275,59 @@ def _cast_runtime_dtypes(
     model.multi_modal_projector.to(projector_dtype)
 
 
+def _mean_text_embedding_norm(
+    model: LlavaForConditionalGeneration,
+    image_token_index: int | None,
+) -> float:
+    embedding_weight = model.get_input_embeddings().weight.detach().float()
+    token_norms = embedding_weight.norm(dim=-1)
+    keep = token_norms > 1e-12
+    if isinstance(image_token_index, int) and 0 <= image_token_index < keep.numel():
+        keep[image_token_index] = False
+    return float(token_norms[keep].mean().item())
+
+
+def _optional_float(value) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip().lower() in {"", "none", "null"}:
+        return None
+    return float(value)
+
+
+def _configure_projector_post_norm(
+    model: LlavaForConditionalGeneration,
+    image_token_index: int | None,
+    projector_norm: str | None,
+    target_multiplier: float,
+    trainable: bool,
+    min_multiplier: float | None,
+    max_multiplier: float | None,
+    eps: float,
+    projector_dtype: torch.dtype,
+) -> None:
+    norm_name = str(projector_norm or "none").strip().lower()
+    if norm_name in {"", "none", "null", "false", "off"}:
+        return
+    if norm_name not in {"rmsnorm", "rms"}:
+        raise ValueError(
+            f"Unsupported projector_norm '{projector_norm}'. Use 'rmsnorm' or 'none'."
+        )
+
+    text_norm = _mean_text_embedding_norm(model, image_token_index=image_token_index)
+    hidden_size = int(model.config.text_config.hidden_size)
+    post_norm = PostProjectorRMSNorm(
+        hidden_size=hidden_size,
+        text_embedding_norm=text_norm,
+        target_norm_multiplier=target_multiplier,
+        eps=eps,
+        trainable=trainable,
+        min_norm_multiplier=_optional_float(min_multiplier),
+        max_norm_multiplier=_optional_float(max_multiplier),
+    )
+    model.multi_modal_projector.post_projector_norm = post_norm.to(projector_dtype)
+
+
 def _patch_projector_input_dtype(projector) -> None:
     """
     HF LLaVA passes vision-tower hidden states directly into the projector.
@@ -193,6 +345,9 @@ def _patch_projector_input_dtype(projector) -> None:
         hidden_states = self.linear_1(image_features)
         hidden_states = self.act(hidden_states)
         hidden_states = self.linear_2(hidden_states)
+        post_norm = getattr(self, "post_projector_norm", None)
+        if post_norm is not None:
+            hidden_states = post_norm(hidden_states)
         return hidden_states
 
     projector.forward = MethodType(forward, projector)

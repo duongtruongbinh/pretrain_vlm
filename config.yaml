@@ -34,12 +34,10 @@ prepare_coco:
 
 train:
   train_jsonl:
-    - /home/docs/nhantd/LLAVA/data/coco2017/train.jsonl
     - /home/docs/nhantd/LLAVA/data/uit-openviic/train.jsonl
   eval_jsonl:
-    - /home/docs/nhantd/LLAVA/data/coco2017/val.jsonl
     - /home/docs/nhantd/LLAVA/data/uit-openviic/val.jsonl
-  output_dir: /home/docs/nhantd/LLAVA/outputs/stage_1_projector_coco_uit_balanced_fp32_lr1e4_final
+  output_dir: /home/docs/nhantd/LLAVA/outputs/stage_1_projector_uit_rmsnorm_x3_lr1e4
   vision_model: google/siglip2-so400m-patch16-384
   llm_model: meta-llama/Llama-3.2-1B-Instruct
   epochs: 2
@@ -56,6 +54,12 @@ train:
   resume_from: null
   model_dtype: bfloat16
   projector_dtype: float32
+  projector_norm: rmsnorm
+  projector_norm_target_multiplier: 3.0
+  projector_norm_trainable: true
+  projector_norm_min_multiplier: 1.0
+  projector_norm_max_multiplier: 10.0
+  projector_norm_eps: 1.0e-6
 
 instruction_data:
   dataset_name: 5CD-AI/Viet-ShareGPT-4o-Text-VQA
@@ -87,6 +91,12 @@ instruction_train:
   mixed_precision: bf16
   model_dtype: bfloat16
   projector_dtype: bfloat16
+  projector_norm: rmsnorm
+  projector_norm_target_multiplier: 3.0
+  projector_norm_trainable: true
+  projector_norm_min_multiplier: 1.0
+  projector_norm_max_multiplier: 10.0
+  projector_norm_eps: 1.0e-6
   optimizer_type: adafactor
   adam_foreach: false
   max_text_tokens: 768
