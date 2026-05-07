@@ -135,7 +135,6 @@ def _train_window(
     accelerator.clip_grad_norm_(list(trainable_parameters()), max_grad_norm)
     optimizer.step()
     scheduler.step()
-    optimizer.zero_grad(set_to_none=True)
 
     stats = torch.stack([local_loss_sum, local_token_sum]).unsqueeze(0)
     gathered = accelerator.gather_for_metrics(stats)

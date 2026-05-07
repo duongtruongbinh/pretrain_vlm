@@ -152,6 +152,7 @@ def main() -> None:
         cfg["llm_model"],
         model_dtype=cfg.get("model_dtype"),
         projector_dtype=cfg.get("projector_dtype", "float32"),
+        image_token_id=collator.image_token_id,
     )
     freeze_components(model, freeze_vision=True, train_projector=True, train_llm=False)
 

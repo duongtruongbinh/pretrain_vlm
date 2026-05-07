@@ -56,24 +56,24 @@ def build_model(
     model_dtype: str | None = None,
     projector_dtype: str | None = DEFAULT_PROJECTOR_DTYPE,
     projector_state: dict | None = None,
+    image_token_id: int | None = None,
 ) -> LlavaForConditionalGeneration:
     """
     Build LlavaForConditionalGeneration from pretrained SigLIP2 + Llama weights.
 
+    Pass image_token_id from an already-built processor to avoid a redundant processor build.
+    If None, build_processor() is called internally to resolve it.
     projector_state: if provided, load into multi_modal_projector (stage-1 warm-start).
-    The projector is otherwise randomly initialised.
-
-    Note: build_processor() must be called with the same vision_model_name and
-    llm_model_name so the processor's patch_size matches the model's vision config.
     """
 
     dtype = _resolve_dtype(model_dtype)
     resolved_projector_dtype = _resolve_dtype(projector_dtype) or torch.float32
 
-    # Use build_processor to resolve patch_size and token IDs consistently.
-    processor = build_processor(vision_model_name, tokenizer_name_or_path or llm_model_name)
-    tokenizer = processor.tokenizer
-    image_token_index = tokenizer.convert_tokens_to_ids(IMAGE_TOKEN)
+    if image_token_id is not None:
+        image_token_index = image_token_id
+    else:
+        _proc = build_processor(vision_model_name, tokenizer_name_or_path or llm_model_name)
+        image_token_index = _proc.tokenizer.convert_tokens_to_ids(IMAGE_TOKEN)
 
     vision_root_config = AutoConfig.from_pretrained(vision_model_name)
     vision_config = getattr(vision_root_config, "vision_config", vision_root_config)
@@ -183,8 +183,11 @@ def _patch_projector_input_dtype(projector) -> None:
 
 def _patch_last_hidden_state_image_features(model: LlavaForConditionalGeneration) -> None:
     """
-    Match the local vlm_pretrain baseline by feeding SigLIP last_hidden_state
-    into the multimodal projector instead of HF LLaVA's hidden_states[layer].
+    Stock HF LLaVA calls vision_tower with output_hidden_states=True, which retains
+    every layer's activations in memory. For SigLIP2-so400m-384px (576 tokens × 48 layers)
+    this is hundreds of MB of VRAM with no benefit when vision_feature_layer=-1, because
+    hidden_states[-1] == last_hidden_state. This patch uses output_hidden_states=False and
+    reads last_hidden_state directly, giving identical results at much lower peak VRAM.
     """
 
     def get_image_features(

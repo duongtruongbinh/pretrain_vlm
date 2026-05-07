@@ -11,6 +11,7 @@ from typing import Any
 
 import torch
 import yaml
+from loguru import logger
 
 
 def _remap_projector_state(state_dict: dict) -> dict:
@@ -57,7 +58,7 @@ def save_training_checkpoint(
     if tokenizer is not None:
         tokenizer.save_pretrained(checkpoint_dir / "tokenizer")
 
-    if hasattr(model, "lm_head"):
+    if save_language_model and hasattr(model, "lm_head"):
         torch.save(model.lm_head.state_dict(), checkpoint_dir / "lm_head.pt")
     if save_language_model:
         model.language_model.save_pretrained(checkpoint_dir / "llm", safe_serialization=True)
@@ -185,8 +186,8 @@ def _safe_load_optimizer_state(optimizer, state_dict) -> None:
     try:
         optimizer.load_state_dict(state_dict)
     except ValueError as error:
-        print(
-            "[checkpoint][warn] skipped optimizer state because the "
+        logger.warning(
+            "skipped optimizer state because the "
             f"projector parameter set changed: {error}"
         )
 

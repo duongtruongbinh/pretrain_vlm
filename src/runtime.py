@@ -83,14 +83,13 @@ def setup_logger(output_dir: str | Path, accelerator):
 
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-    logger.add(_tqdm_sink, level="INFO", colorize=True)
+    logger.add(_tqdm_sink, level="INFO", 
+        format="<green>{time:HH:mm:ss}</green> | <level>{level: <6}</level> | {message}",
+        colorize=True)
     logger.add(
-        output_path / "train.log",
-        level="INFO",
-        encoding="utf-8",
-        rotation="50 MB",
-        retention=5,
-        enqueue=True,
+        output_path / "train.log", level="INFO",
+        encoding="utf-8", rotation="50 MB",
+        retention=5, enqueue=True,
     )
     return logger
 

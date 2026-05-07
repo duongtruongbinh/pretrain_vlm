@@ -45,7 +45,7 @@ train:
   epochs: 2
   batch_size: 1
   grad_accum: 32
-  gradient_checkpointing: true
+  gradient_checkpointing: false
   lr: 1.0e-3
   warmup_ratio: 0.03
   log_steps: 10

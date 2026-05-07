@@ -214,6 +214,7 @@ def main() -> None:
         tokenizer_name_or_path=tokenizer_source,
         model_dtype=cfg.get("model_dtype"),
         projector_dtype=cfg.get("projector_dtype", "float32"),
+        image_token_id=collator.image_token_id,
     )
     component_modes = {
         "freeze_vision": bool(cfg.get("freeze_vision", True)),
