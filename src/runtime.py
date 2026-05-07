@@ -83,14 +83,13 @@ def setup_logger(output_dir: str | Path, accelerator):
 
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-    logger.add(_tqdm_sink, level="INFO", colorize=True)
+    logger.add(_tqdm_sink, level="INFO", 
+        format="<green>{time:HH:mm:ss}</green> | <level>{level: <6}</level> | {message}",
+        colorize=True)
     logger.add(
-        output_path / "train.log",
-        level="INFO",
-        encoding="utf-8",
-        rotation="50 MB",
-        retention=5,
-        enqueue=True,
+        output_path / "train.log", level="INFO",
+        encoding="utf-8", rotation="50 MB",
+        retention=5, enqueue=True,
     )
     return logger
 
@@ -143,4 +142,12 @@ def append_jsonl(path: Path, record: dict) -> None:
 
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def current_lr(scheduler, optimizer) -> float:
+    """Return current learning rate from scheduler, falling back to optimizer."""
+    try:
+        return float(scheduler.get_last_lr()[0])
+    except Exception:
+        return float(optimizer.param_groups[0]["lr"])
 

@@ -45,7 +45,7 @@ train:
   epochs: 2
   batch_size: 1
   grad_accum: 32
-  gradient_checkpointing: true
+  gradient_checkpointing: false
   lr: 1.0e-3
   warmup_ratio: 0.03
   log_steps: 10
@@ -56,7 +56,6 @@ train:
   seed: 42
   model_dtype: bfloat16
   projector_dtype: float32
-  projector_norm: none
 
 train_uit_only:
   train_jsonl:
@@ -80,7 +79,6 @@ train_uit_only:
   seed: 42
   model_dtype: bfloat16
   projector_dtype: float32
-  projector_norm: none
 
 instruction_data:
   dataset_name: 5CD-AI/Viet-ShareGPT-4o-Text-VQA
@@ -112,12 +110,6 @@ instruction_train:
   mixed_precision: bf16
   model_dtype: bfloat16
   projector_dtype: bfloat16
-  projector_norm: rmsnorm
-  projector_norm_target_multiplier: 3.0
-  projector_norm_trainable: true
-  projector_norm_min_multiplier: 1.0
-  projector_norm_max_multiplier: 10.0
-  projector_norm_eps: 1.0e-6
   optimizer_type: adafactor
   adam_foreach: false
   max_text_tokens: 1024

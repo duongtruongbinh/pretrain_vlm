@@ -70,7 +70,7 @@ def run_training(
 
             step_result = _train_window(
                 model=model, window=window, optimizer=optimizer, scheduler=scheduler, accelerator=accelerator,
-                grad_accum=grad_accum, trainable_parameters=trainable_parameters, max_grad_norm=max_grad_norm,
+                trainable_parameters=trainable_parameters, max_grad_norm=max_grad_norm,
             )
             if step_result is None:
                 continue
@@ -101,9 +101,9 @@ def _next_window(iterator, grad_accum: int) -> list[dict[str, Any]]:
 
 def _train_window(
     *, model, window: list[dict[str, Any]], optimizer, scheduler, accelerator,
-    grad_accum: int, trainable_parameters: ParamsCallback, max_grad_norm: float,
+    trainable_parameters: ParamsCallback, max_grad_norm: float,
 ) -> dict[str, float | int] | None:
-    local_tokens = sum(_supervised_tokens(batch) for batch in window)
+    local_tokens = torch.stack([_supervised_tokens(batch) for batch in window]).sum()
     global_tokens = accelerator.gather(local_tokens).sum().item()
     if global_tokens <= 0:
         return None
@@ -122,20 +122,19 @@ def _train_window(
             with accelerator.autocast():
                 outputs = model(**batch)
 
-            batch_tokens = _supervised_tokens(batch).to(outputs.loss.device)
+            batch_tokens = _supervised_tokens(batch)
             if batch_tokens.item() <= 0:
                 continue
 
             batch_loss_sum = outputs.loss.float() * batch_tokens.float()
-            scaled_loss = batch_loss_sum * grad_accum * accelerator.num_processes / global_tokens
+            scaled_loss = batch_loss_sum * accelerator.num_processes / global_tokens
             accelerator.backward(scaled_loss)
-            local_loss_sum = local_loss_sum + batch_loss_sum.detach().to(local_loss_sum.device)
-            local_token_sum = local_token_sum + batch_tokens.detach().float().to(local_token_sum.device)
+            local_loss_sum = local_loss_sum + batch_loss_sum.detach()
+            local_token_sum = local_token_sum + batch_tokens.float()
 
     accelerator.clip_grad_norm_(list(trainable_parameters()), max_grad_norm)
     optimizer.step()
     scheduler.step()
-    optimizer.zero_grad(set_to_none=True)
 
     stats = torch.stack([local_loss_sum, local_token_sum]).unsqueeze(0)
     gathered = accelerator.gather_for_metrics(stats)
