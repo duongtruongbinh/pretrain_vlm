@@ -17,6 +17,7 @@ from src.modeling import build_model, freeze_components, set_component_modes
 from src.runtime import (
     EpochShuffleSampler,
     append_jsonl,
+    current_lr,
     load_config,
     resolve_config_path,
     set_seed,
@@ -120,6 +121,7 @@ def _resolve_resume_sources(resume_dir: Path | None, base_llm_model: str) -> tup
 def _log_eval_samples(model, collator, eval_samples, accelerator, max_new_tokens):
     unwrapped = accelerator.unwrap_model(model)
     tokenizer = collator.tokenizer
+    eos_ids = sorted({tokenizer.eos_token_id, tokenizer.convert_tokens_to_ids("<|end_of_text|>")})
     lines = []
     for idx, sample in enumerate(eval_samples, 1):
         try:
@@ -133,7 +135,6 @@ def _log_eval_samples(model, collator, eval_samples, accelerator, max_new_tokens
         prompt_ids, attn_mask, pixel_values = collator.build_prompt_tensors(
             sample["messages"][:-1], img, device=accelerator.device
         )
-        eos_ids = sorted({tokenizer.eos_token_id, tokenizer.convert_tokens_to_ids("<|end_of_text|>")})
         with torch.no_grad(), accelerator.autocast():
             generated_ids = unwrapped.generate(
                 input_ids=prompt_ids,
@@ -158,13 +159,6 @@ def _log_eval_samples(model, collator, eval_samples, accelerator, max_new_tokens
         ]:
             lines.append(line)
     return lines
-
-
-def _current_lr(scheduler, optimizer) -> float:
-    try:
-        return float(scheduler.get_last_lr()[0])
-    except Exception:
-        return float(optimizer.param_groups[0]["lr"])
 
 
 def main() -> None:
@@ -215,6 +209,7 @@ def main() -> None:
         model_dtype=cfg.get("model_dtype"),
         projector_dtype=cfg.get("projector_dtype", "float32"),
         image_token_id=collator.image_token_id,
+        vocab_size=len(collator.tokenizer),
     )
     component_modes = {
         "freeze_vision": bool(cfg.get("freeze_vision", True)),
@@ -310,12 +305,12 @@ def main() -> None:
     def on_epoch_start(epoch: int) -> None:
         train_sampler.set_epoch(epoch)
 
-    def on_step_end(result, training_state) -> None:
+    def on_step_end(result, _training_state) -> None:
         if progress is not None:
             progress.update(1)
             progress.set_postfix(
                 train_loss=f"{result.train_loss:.6f}",
-                lr=f"{_current_lr(scheduler, optimizer):.3e}",
+                lr=f"{current_lr(scheduler, optimizer):.3e}",
                 supervised_tokens=result.supervised_tokens,
             )
 
@@ -324,7 +319,7 @@ def main() -> None:
                 "step {}: train_loss={:.6f}, lr={:.6e}, supervised_tokens={}",
                 result.global_step,
                 result.train_loss,
-                _current_lr(scheduler, optimizer),
+                current_lr(scheduler, optimizer),
                 result.supervised_tokens,
             )
             if accelerator.is_main_process:

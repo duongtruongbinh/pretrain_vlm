@@ -51,16 +51,12 @@ def save_training_checkpoint(
     torch.save(scheduler.state_dict(), checkpoint_dir / "scheduler.pt")
     torch.save(_rng_state(int(training_config.get("seed", 0))), checkpoint_dir / "rng_state.pt")
 
-    if hasattr(model, "config"):
-        model.config.save_pretrained(checkpoint_dir / "model_config")
-    if processor is not None:
-        processor.save_pretrained(checkpoint_dir / "processor")
-    if tokenizer is not None:
-        tokenizer.save_pretrained(checkpoint_dir / "tokenizer")
+    model.config.save_pretrained(checkpoint_dir / "model_config")
+    processor.save_pretrained(checkpoint_dir / "processor")
+    tokenizer.save_pretrained(checkpoint_dir / "tokenizer")
 
-    if save_language_model and hasattr(model, "lm_head"):
-        torch.save(model.lm_head.state_dict(), checkpoint_dir / "lm_head.pt")
     if save_language_model:
+        torch.save(model.lm_head.state_dict(), checkpoint_dir / "lm_head.pt")
         model.language_model.save_pretrained(checkpoint_dir / "llm", safe_serialization=True)
 
     full_state = {"stage": stage, **trainer_state}
@@ -79,7 +75,7 @@ def load_projector_checkpoint(
     if checkpoint_path.is_file():
         return _load_legacy_projector_ckpt(checkpoint_path, model, optimizer, scheduler)
 
-    raw = torch.load(checkpoint_path / "projector.pt", map_location="cpu")
+    raw = torch.load(checkpoint_path / "projector.pt", map_location="cpu", weights_only=True)
     raw_state = raw["projector_state_dict"] if "projector_state_dict" in raw else raw
     model.multi_modal_projector.load_state_dict(_remap_projector_state(raw_state), strict=False)
     _maybe_load_optimizer_scheduler(checkpoint_path, optimizer, scheduler)
@@ -96,8 +92,8 @@ def load_full_checkpoint(
     checkpoint_dir = Path(path)
     state = load_projector_checkpoint(checkpoint_dir, model, optimizer, scheduler, restore_rng=restore_rng)
     lm_head_path = checkpoint_dir / "lm_head.pt"
-    if lm_head_path.exists() and hasattr(model, "lm_head"):
-        model.lm_head.load_state_dict(torch.load(lm_head_path, map_location="cpu"))
+    if lm_head_path.exists():
+        model.lm_head.load_state_dict(torch.load(lm_head_path, map_location="cpu", weights_only=True))
     return state
 
 
@@ -149,7 +145,7 @@ def rotate_checkpoints(
 
 
 def _load_legacy_projector_ckpt(path: Path, model, optimizer=None, scheduler=None) -> dict[str, Any]:
-    ckpt = torch.load(str(path), map_location="cpu")
+    ckpt = torch.load(str(path), map_location="cpu", weights_only=True)
     state = _remap_projector_state(ckpt["projector_state_dict"])
     model.multi_modal_projector.load_state_dict(state, strict=False)
     if optimizer is not None and "optimizer_state_dict" in ckpt:
@@ -160,11 +156,11 @@ def _load_legacy_projector_ckpt(path: Path, model, optimizer=None, scheduler=Non
 
 
 def _load_trainer_state(checkpoint_dir: Path) -> dict[str, Any]:
-    trainer_state_path = checkpoint_dir / "trainer_state.json"
-    if not trainer_state_path.exists():
+    try:
+        with (checkpoint_dir / "trainer_state.json").open("r", encoding="utf-8") as fh:
+            state = json.load(fh)
+    except FileNotFoundError:
         return {"global_step": 0, "epoch": 0, "best_eval_loss": None}
-    with trainer_state_path.open("r", encoding="utf-8") as fh:
-        state = json.load(fh)
     if "global_step" not in state and "step" in state:
         state["global_step"] = state["step"]
     state.setdefault("global_step", 0)
@@ -176,10 +172,10 @@ def _load_trainer_state(checkpoint_dir: Path) -> dict[str, Any]:
 def _maybe_load_optimizer_scheduler(checkpoint_dir: Path, optimizer=None, scheduler=None) -> None:
     if optimizer is not None and (checkpoint_dir / "optimizer.pt").exists():
         _safe_load_optimizer_state(
-            optimizer, torch.load(checkpoint_dir / "optimizer.pt", map_location="cpu")
+            optimizer, torch.load(checkpoint_dir / "optimizer.pt", map_location="cpu", weights_only=True)
         )
     if scheduler is not None and (checkpoint_dir / "scheduler.pt").exists():
-        scheduler.load_state_dict(torch.load(checkpoint_dir / "scheduler.pt", map_location="cpu"))
+        scheduler.load_state_dict(torch.load(checkpoint_dir / "scheduler.pt", map_location="cpu", weights_only=True))
 
 
 def _safe_load_optimizer_state(optimizer, state_dict) -> None:
@@ -207,7 +203,7 @@ def _rng_state(seed: int) -> dict[str, Any]:
 def _restore_rng_state(path: Path) -> None:
     if not path.exists():
         return
-    state = torch.load(path, map_location="cpu")
+    state = torch.load(path, map_location="cpu", weights_only=False)  # contains Python random state
     if "python" in state:
         random.setstate(state["python"])
     if "torch" in state:

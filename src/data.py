@@ -43,13 +43,9 @@ class ImageCaptionDataset(Dataset):
         return len(self.records)
 
     def __getitem__(self, index: int):
-        num_records = len(self.records)
-        if num_records == 0:
-            loaded_paths = ", ".join(str(path) for path in self.jsonl_paths)
-            raise RuntimeError(f"No records were loaded from: {loaded_paths}")
-
-        for offset in range(num_records):
-            current_index = (index + offset) % num_records
+        n = len(self.records)
+        for offset in range(n):
+            current_index = (index + offset) % n
             if current_index in self.bad_indices:
                 continue
 
@@ -127,12 +123,9 @@ class ImageInstructionDataset(Dataset):
         return len(self.records)
 
     def __getitem__(self, index: int):
-        num_records = len(self.records)
-        if num_records == 0:
-            raise RuntimeError(f"No records were loaded from {self.jsonl_path}.")
-
-        for offset in range(num_records):
-            current_index = (index + offset) % num_records
+        n = len(self.records)
+        for offset in range(n):
+            current_index = (index + offset) % n
             if current_index in self.bad_indices:
                 continue
 

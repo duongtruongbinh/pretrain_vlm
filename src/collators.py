@@ -13,9 +13,11 @@ PROMPT_TEMPLATE = f"{IMAGE_TOKEN}\n{_CAPTION_PROMPT}"
 
 
 def _image_seq_length(processor) -> int:
-    """Number of image feature tokens produced by the processor for one image."""
     h = processor.image_processor.size["height"]
-    return (h // processor.patch_size) ** 2
+    n = (h // processor.patch_size) ** 2
+    if processor.vision_feature_select_strategy == "default":
+        n -= 1
+    return n + processor.num_additional_image_tokens
 
 
 class CaptionCollator:
@@ -37,20 +39,12 @@ class CaptionCollator:
         self._prompt_len = len(self.tokenizer(_expanded)["input_ids"])
 
     def __call__(self, batch):
-        samples = [s for s in batch if s is not None]
-        if not samples:
-            raise RuntimeError("Received an empty batch after filtering invalid samples.")
-
-        for s in samples:
+        for s in batch:
             if not s["caption"].strip():
                 raise ValueError("Received an empty caption.")
 
-        images = [s["image"] for s in samples]
-        texts = [
-            f"{PROMPT_TEMPLATE}{s['caption'].strip()}{self.tokenizer.eos_token}"
-            for s in samples
-        ]
-
+        images = [s["image"] for s in batch]
+        texts = [f"{PROMPT_TEMPLATE}{s['caption'].strip()}{self.tokenizer.eos_token}" for s in batch]
         encoded = self.processor(text=texts, images=images, padding=True, return_tensors="pt")
 
         labels = encoded["input_ids"].clone()
@@ -97,8 +91,6 @@ class InstructionCollator:
             messages[:-1], tokenize=False, add_generation_prompt=True
         )
         full_text = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
-        if not full_text:
-            raise ValueError(f"Sample '{sample_id}' produced an empty token sequence.")
         if not full_text.startswith(prompt_text):
             raise ValueError(f"Sample '{sample_id}' failed the prompt-prefix masking check.")
         return prompt_text, full_text
@@ -152,8 +144,7 @@ class InstructionCollator:
         labels[encoded["attention_mask"] == 0] = -100
 
         for row, sample in enumerate(valid):
-            # Expand image token in prompt text, then tokenize text-only to get prompt length.
-            # Avoids re-encoding the image; token count is identical to the batch-encoded prefix.
+            # text-only tokenization matches the batch-encoded prefix; avoids re-encoding the image
             prompt_expanded = sample["prompt_text"].replace(
                 IMAGE_TOKEN, IMAGE_TOKEN * self._image_seq_length
             )

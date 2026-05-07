@@ -57,12 +57,13 @@ def build_model(
     projector_dtype: str | None = DEFAULT_PROJECTOR_DTYPE,
     projector_state: dict | None = None,
     image_token_id: int | None = None,
+    vocab_size: int | None = None,
 ) -> LlavaForConditionalGeneration:
     """
     Build LlavaForConditionalGeneration from pretrained SigLIP2 + Llama weights.
 
-    Pass image_token_id from an already-built processor to avoid a redundant processor build.
-    If None, build_processor() is called internally to resolve it.
+    Pass image_token_id and vocab_size from an already-built processor to avoid
+    a redundant processor build. If None, build_processor() resolves them.
     projector_state: if provided, load into multi_modal_projector (stage-1 warm-start).
     """
 
@@ -70,10 +71,14 @@ def build_model(
     resolved_projector_dtype = _resolve_dtype(projector_dtype) or torch.float32
 
     if image_token_id is not None:
+        if vocab_size is None:
+            raise ValueError("vocab_size is required when image_token_id is provided")
         image_token_index = image_token_id
+        _vocab_size = vocab_size
     else:
         _proc = build_processor(vision_model_name, tokenizer_name_or_path or llm_model_name)
         image_token_index = _proc.tokenizer.convert_tokens_to_ids(IMAGE_TOKEN)
+        _vocab_size = len(_proc.tokenizer)
 
     vision_root_config = AutoConfig.from_pretrained(vision_model_name)
     vision_config = getattr(vision_root_config, "vision_config", vision_root_config)
@@ -96,8 +101,8 @@ def build_model(
     # Resize after loading the pretrained LLM so existing token embeddings and
     # lm_head rows are preserved. The new <image> token is only a placeholder
     # that HF LLaVA replaces with projected image features during forward.
-    if len(tokenizer) != model.get_input_embeddings().num_embeddings:
-        model.resize_token_embeddings(len(tokenizer))
+    if _vocab_size != model.get_input_embeddings().num_embeddings:
+        model.resize_token_embeddings(_vocab_size)
 
     _cast_runtime_dtypes(model, dtype, resolved_projector_dtype)
     if projector_state is not None:
@@ -197,6 +202,7 @@ def _patch_last_hidden_state_image_features(model: LlavaForConditionalGeneration
         vision_feature_select_strategy: str | None = None,
         **kwargs,
     ):
+        del vision_feature_layer  # always use last_hidden_state regardless of layer index
         vision_feature_select_strategy = (
             vision_feature_select_strategy
             if vision_feature_select_strategy is not None

@@ -17,6 +17,7 @@ from src.modeling import build_model, freeze_components
 from src.runtime import (
     append_jsonl,
     build_weighted_sampler,
+    current_lr,
     load_config,
     resolve_config_paths,
     set_seed,
@@ -42,36 +43,16 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _select_eval_samples(records: list[dict], sample_count: int = 5) -> list[dict]:
-    """Select a small deterministic set of unique-image eval samples."""
-
-    if sample_count <= 0 or not records:
+    if not records or sample_count <= 0:
         return []
-    if len(records) <= sample_count:
-        return records
-
-    anchors = [round(i * (len(records) - 1) / (sample_count - 1)) for i in range(sample_count)]
-    selected, seen_images = [], set()
-    for anchor in anchors:
-        for offset in range(len(records)):
-            record = records[(anchor + offset) % len(records)]
-            image = record.get("image")
-            if image not in seen_images:
-                selected.append(record)
-                seen_images.add(image)
-                break
-
-    selected_ids = {id(record) for record in selected}
-    for record in records:
-        if len(selected) >= sample_count:
-            break
-        if id(record) not in selected_ids:
-            selected.append(record)
-    return selected[:sample_count]
+    step = max(1, len(records) // sample_count)
+    return [records[i * step] for i in range(min(sample_count, len(records)))]
 
 
 def _log_eval_samples(model, collator, eval_samples, accelerator, max_new_tokens):
     unwrapped = accelerator.unwrap_model(model)
-    tokenizer = collator.processor.tokenizer
+    tokenizer = collator.tokenizer
+    eos_ids = sorted({tokenizer.eos_token_id, tokenizer.convert_tokens_to_ids("<|end_of_text|>")})
     lines = []
     for idx, sample in enumerate(eval_samples, 1):
         try:
@@ -84,7 +65,6 @@ def _log_eval_samples(model, collator, eval_samples, accelerator, max_new_tokens
 
         inputs = collator.processor(text=PROMPT_TEMPLATE, images=img, return_tensors="pt")
         inputs = {k: v.to(accelerator.device) for k, v in inputs.items()}
-        eos_ids = sorted({tokenizer.eos_token_id, tokenizer.convert_tokens_to_ids("<|end_of_text|>")})
         with torch.no_grad(), accelerator.autocast():
             generated_ids = unwrapped.generate(
                 **inputs,
@@ -106,13 +86,6 @@ def _log_eval_samples(model, collator, eval_samples, accelerator, max_new_tokens
         ]:
             lines.append(line)
     return lines
-
-
-def _current_lr(scheduler, optimizer) -> float:
-    try:
-        return float(scheduler.get_last_lr()[0])
-    except Exception:
-        return float(optimizer.param_groups[0]["lr"])
 
 
 def main() -> None:
@@ -153,6 +126,7 @@ def main() -> None:
         model_dtype=cfg.get("model_dtype"),
         projector_dtype=cfg.get("projector_dtype", "float32"),
         image_token_id=collator.image_token_id,
+        vocab_size=len(collator.tokenizer),
     )
     freeze_components(model, freeze_vision=True, train_projector=True, train_llm=False)
 
@@ -244,12 +218,12 @@ def main() -> None:
         rotate_checkpoints(output_dir, int(cfg["keep_last_n"]))
         return ckpt_path
 
-    def on_step_end(result, training_state) -> None:
+    def on_step_end(result, _training_state) -> None:
         if progress is not None:
             progress.update(1)
             progress.set_postfix(
                 train_loss=f"{result.train_loss:.6f}",
-                lr=f"{_current_lr(scheduler, optimizer):.3e}",
+                lr=f"{current_lr(scheduler, optimizer):.3e}",
                 supervised_tokens=result.supervised_tokens,
             )
 
@@ -258,7 +232,7 @@ def main() -> None:
                 "step {}: train_loss={:.6f}, lr={:.6e}, supervised_tokens={}",
                 result.global_step,
                 result.train_loss,
-                _current_lr(scheduler, optimizer),
+                current_lr(scheduler, optimizer),
                 result.supervised_tokens,
             )
             if accelerator.is_main_process:
