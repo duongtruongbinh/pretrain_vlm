@@ -39,7 +39,7 @@ train:
   eval_jsonl:
     - data/coco2017/val.jsonl
     - data/uit-openviic/val.jsonl
-  output_dir: outputs/stage_1_projector_coco_uit_balanced_fixed_last_hidden_bf16_projfp32_lr1e3
+  output_dir: outputs/stage_1_projector_coco_uit_final
   vision_model: google/siglip2-so400m-patch16-384
   llm_model: meta-llama/Llama-3.2-1B-Instruct
   epochs: 2
@@ -68,7 +68,7 @@ train_uit_only:
   epochs: 2
   batch_size: 1
   grad_accum: 32
-  gradient_checkpointing: true
+  gradient_checkpointing: false
   lr: 1.0e-3
   warmup_ratio: 0.03
   log_steps: 10
