@@ -39,7 +39,7 @@ train:
   eval_jsonl:
     - data/coco2017/val.jsonl
     - data/uit-openviic/val.jsonl
-  output_dir: outputs/stage_1_projector_coco_uit_final
+  output_dir: outputs/stage_1_projector_coco_uit_test
   vision_model: google/siglip2-so400m-patch16-384
   llm_model: meta-llama/Llama-3.2-1B-Instruct
   epochs: 2
@@ -127,4 +127,26 @@ instruction_train:
   keep_last_n: 3
   save_best_by: eval_loss
   max_new_tokens: 768
+  seed: 42
+
+crawl_vietnamtourism:
+  output_dir: data/vietnamtourism-raw
+  category_id: 55
+  max_pages: null
+  max_images: 5000
+  delay_seconds: 1.0
+  min_image_width: 200
+
+generate_qa_vietnamtourism:
+  raw_dir: data/vietnamtourism-raw
+  model: gpt-4o
+  max_tokens: 1024
+  batch_api: true
+
+prepare_vietnamtourism:
+  raw_dir: data/vietnamtourism-raw
+  output_dir: data/vietnamtourism
+  system_prompt: "Bạn là một trợ lý thị giác tiếng Việt, trả lời trung thực và chỉ dựa trên nội dung nhìn thấy trong ảnh."
+  val_ratio: 0.01
+  test_ratio: 0.01
   seed: 42
