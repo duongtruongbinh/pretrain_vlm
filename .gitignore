@@ -54,3 +54,6 @@ Thumbs.db
 
 # Streamlit
 .streamlit/
+
+# Superpowers plugin docs
+docs/superpowers/
