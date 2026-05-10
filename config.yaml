@@ -140,8 +140,7 @@ crawl_vietnamtourism:
 generate_qa_vietnamtourism:
   raw_dir: data/vietnamtourism-raw
   model: gpt-4o
-  max_tokens: 1024
-  batch_api: true
+  max_tokens: 1500
 
 prepare_vietnamtourism:
   raw_dir: data/vietnamtourism-raw
