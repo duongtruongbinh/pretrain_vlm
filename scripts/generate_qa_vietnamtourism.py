@@ -125,6 +125,9 @@ def main() -> None:
     raw_dir = Path(cfg["raw_dir"]).expanduser().resolve()
     model = str(cfg.get("model", "gpt-4o"))
     max_tokens = int(cfg.get("max_tokens", 1500))
+    max_images = cfg.get("max_images")
+    if max_images is not None:
+        max_images = int(max_images)
 
     raw_jsonl = raw_dir / "raw_crawl.jsonl"
     batch_input = raw_dir / "batch_input.jsonl"
@@ -145,6 +148,8 @@ def main() -> None:
     records: list[dict] = []
     with raw_jsonl.open(encoding="utf-8") as fh:
         for line in fh:
+            if max_images is not None and len(records) >= max_images:
+                break
             line = line.strip()
             if not line:
                 continue

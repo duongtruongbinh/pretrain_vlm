@@ -141,6 +141,7 @@ generate_qa_vietnamtourism:
   raw_dir: data/vietnamtourism-raw
   model: gpt-5-nano
   max_tokens: 800
+  max_images: 100
 
 prepare_vietnamtourism:
   raw_dir: data/vietnamtourism-raw
