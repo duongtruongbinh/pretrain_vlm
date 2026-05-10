@@ -33,22 +33,16 @@ _SYSTEM_PROMPT = (
 )
 
 _INSTRUCTION = """\
-Tạo đúng 4 cặp câu hỏi-trả lời về bức ảnh theo 4 loại sau.
+Tạo đúng 2 cặp câu hỏi-trả lời về bức ảnh theo 2 loại sau.
 Trả về JSON hợp lệ (không thêm bất kỳ nội dung nào ngoài JSON):
 
 [
   {"type": "description",
    "question": "<hỏi mô tả tổng thể: cảnh vật, con người, màu sắc, bố cục không gian>",
    "answer":   "<3–5 câu: vật thể chính, màu sắc, vị trí tương đối, hoạt động, ánh sáng/thời tiết>"},
-  {"type": "factual",
-   "question": "<hỏi ngắn về 1 yếu tố cụ thể quan sát được: đối tượng, hành động, số lượng, màu sắc>",
-   "answer":   "<trả lời trực tiếp 1–2 câu>"},
   {"type": "cultural",
    "question": "<hỏi về ý nghĩa văn hóa, lễ hội, phong tục, ẩm thực hoặc kiến trúc đặc trưng Việt Nam>",
-   "answer":   "<2–3 câu kết nối nội dung ảnh với bối cảnh văn hóa-du lịch Việt Nam>"},
-  {"type": "reasoning",
-   "question": "<hỏi phân tích suy luận: tại sao, như thế nào, kết nối nhiều yếu tố trong ảnh>",
-   "answer":   "<2–3 câu lập luận từ bằng chứng quan sát, trình bày theo logic>"}
+   "answer":   "<2–3 câu kết nối nội dung ảnh với bối cảnh văn hóa-du lịch Việt Nam>"}
 ]
 
 Yêu cầu bắt buộc:
