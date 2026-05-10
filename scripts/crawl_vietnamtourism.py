@@ -41,6 +41,18 @@ def _resolve_img_src(src: str, cdn_base: str) -> str:
     return cdn_base + (src if src.startswith("/") else "/" + src)
 
 
+def _clean_caption(caption: str) -> str:
+    caption = caption.replace("\xa0", " ").strip()
+    # Parenthesized notes first — prevents bare-credit regex eating inside "(Ảnh: ...)"
+    caption = re.sub(r"\s*\([Ảả]nh[^)]*\)\s*$", "", caption).strip()
+    # Bare credit: uppercase "Ảnh:" only — "Trong ảnh:" uses lowercase and is kept
+    caption = re.sub(r"[,\s]*[-–]?\s*Ảnh\s*:\s*[^\n]*$", "", caption).strip()
+    # Standalone illustrative-photo markers
+    if re.fullmatch(r"[Ảả]nh\s+minh\s+\S+", caption):
+        return ""
+    return caption
+
+
 def _parse_width_from_style(style: str) -> int:
     # Match standalone `width:` but not `border-width:` or `max-width:`
     m = re.search(r"(?<![a-z-])width\s*:\s*(\d+)", style or "")
@@ -205,7 +217,7 @@ def main() -> None:
                         "image_id": image_id,
                         "image_path": str(dest),
                         "title": title,
-                        "caption": img_info["caption"],
+                        "caption": _clean_caption(img_info["caption"]),
                         "article_url": article_url,
                         "date": date,
                         "post_id": post_id,
