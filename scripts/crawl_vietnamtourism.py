@@ -2,15 +2,14 @@
 from __future__ import annotations
 
 import hashlib
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import json
 import re
+import sys
 import time
 from pathlib import Path
 from urllib.parse import urlparse
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import requests
 from bs4 import BeautifulSoup
@@ -36,7 +35,6 @@ def make_image_id(post_id: str, img_src: str) -> str:
 
 
 def _resolve_img_src(src: str, cdn_base: str) -> str:
-    """Resolve a relative or absolute image src to a full URL using the CDN base."""
     if src.startswith("http://") or src.startswith("https://"):
         return src
     # Relative path like /images/2026/... → cdn_base + /images/2026/...
@@ -51,7 +49,6 @@ def _parse_width_from_style(style: str) -> int:
 
 def extract_images_from_html(
     html: str,
-    base_url: str,  # kept for API compatibility (used by tests)
     min_width: int = 200,
     cdn_base: str = IMG_CDN,
 ) -> list[dict]:
@@ -187,7 +184,7 @@ def main() -> None:
                 article_url = f"https://vietnamtourism.gov.vn/post/{post_id}"
 
                 for img_info in extract_images_from_html(
-                    post.get("content", ""), base_url="", min_width=min_width
+                    post.get("content", ""), min_width=min_width
                 ):
                     if total_new + already_crawled >= max_images:
                         break

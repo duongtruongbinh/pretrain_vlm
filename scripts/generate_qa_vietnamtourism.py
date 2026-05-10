@@ -25,7 +25,6 @@ _MEDIA_TYPES: dict[str, str] = {
     ".webp": "image/webp",
 }
 
-# Role prompt: domain expert establishes grounding principle
 _SYSTEM_PROMPT = (
     "Bạn là chuyên gia văn hóa, địa lý và du lịch Việt Nam với kiến thức sâu rộng "
     "về cảnh quan, phong tục, lịch sử và ẩm thực Việt Nam. Nhiệm vụ của bạn là tạo "
@@ -33,33 +32,33 @@ _SYSTEM_PROMPT = (
     "chỉ dựa trên những gì quan sát được trong ảnh và thông tin ngữ cảnh được cung cấp."
 )
 
-# 4-type instruction (LLaVA description + reasoning, ShareGPT4V richness, InstructBLIP factual)
-_INSTRUCTION = (
-    "Tạo đúng 4 cặp câu hỏi-trả lời về bức ảnh theo 4 loại sau.\n"
-    "Trả về JSON hợp lệ (không thêm bất kỳ nội dung nào ngoài JSON):\n\n"
-    "[\n"
-    '  {"type": "description", '
-    '"question": "<hỏi mô tả tổng thể: cảnh vật, con người, màu sắc, bố cục không gian>", '
-    '"answer": "<3–5 câu: vật thể chính, màu sắc, vị trí tương đối, hoạt động, ánh sáng/thời tiết>"},\n'
-    '  {"type": "factual", '
-    '"question": "<hỏi ngắn về 1 yếu tố cụ thể quan sát được: đối tượng, hành động, số lượng, màu sắc>", '
-    '"answer": "<trả lời trực tiếp 1–2 câu>"},\n'
-    '  {"type": "cultural", '
-    '"question": "<hỏi về ý nghĩa văn hóa, lễ hội, phong tục, ẩm thực hoặc kiến trúc đặc trưng Việt Nam>", '
-    '"answer": "<2–3 câu kết nối nội dung ảnh với bối cảnh văn hóa-du lịch Việt Nam>"},\n'
-    '  {"type": "reasoning", '
-    '"question": "<hỏi phân tích suy luận: tại sao, như thế nào, kết nối nhiều yếu tố trong ảnh>", '
-    '"answer": "<2–3 câu lập luận từ bằng chứng quan sát, trình bày theo logic>"}\n'
-    "]\n\n"
-    "Yêu cầu bắt buộc:\n"
-    "- Câu hỏi đa dạng cách hỏi, tự nhiên (không lặp cùng công thức như \"Trong ảnh có gì?\")\n"
-    "- Chỉ đề cập những gì thực sự thấy được trong ảnh hoặc có trong tiêu đề/chú thích\n"
-    "- Câu trả lời cụ thể và thông tin, tránh chung chung và mơ hồ"
-)
+_INSTRUCTION = """\
+Tạo đúng 4 cặp câu hỏi-trả lời về bức ảnh theo 4 loại sau.
+Trả về JSON hợp lệ (không thêm bất kỳ nội dung nào ngoài JSON):
+
+[
+  {"type": "description",
+   "question": "<hỏi mô tả tổng thể: cảnh vật, con người, màu sắc, bố cục không gian>",
+   "answer":   "<3–5 câu: vật thể chính, màu sắc, vị trí tương đối, hoạt động, ánh sáng/thời tiết>"},
+  {"type": "factual",
+   "question": "<hỏi ngắn về 1 yếu tố cụ thể quan sát được: đối tượng, hành động, số lượng, màu sắc>",
+   "answer":   "<trả lời trực tiếp 1–2 câu>"},
+  {"type": "cultural",
+   "question": "<hỏi về ý nghĩa văn hóa, lễ hội, phong tục, ẩm thực hoặc kiến trúc đặc trưng Việt Nam>",
+   "answer":   "<2–3 câu kết nối nội dung ảnh với bối cảnh văn hóa-du lịch Việt Nam>"},
+  {"type": "reasoning",
+   "question": "<hỏi phân tích suy luận: tại sao, như thế nào, kết nối nhiều yếu tố trong ảnh>",
+   "answer":   "<2–3 câu lập luận từ bằng chứng quan sát, trình bày theo logic>"}
+]
+
+Yêu cầu bắt buộc:
+- Câu hỏi đa dạng cách hỏi, tự nhiên (không lặp cùng công thức như "Trong ảnh có gì?")
+- Chỉ đề cập những gì thực sự thấy được trong ảnh hoặc có trong tiêu đề/chú thích
+- Câu trả lời cụ thể và thông tin, tránh chung chung và mơ hồ\
+"""
 
 
 def build_user_message(title: str, caption: str, image_path: Path) -> list[dict]:
-    """Build OpenAI user content: image block + context + instruction."""
     context: list[str] = []
     if title:
         context.append(f"Tiêu đề bài viết: {title}")
@@ -78,7 +77,6 @@ def build_user_message(title: str, caption: str, image_path: Path) -> list[dict]
 
 
 def parse_qa_response(content: str) -> list[dict]:
-    """Strip markdown fences and parse JSON QA list from model response."""
     cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip(), flags=re.MULTILINE).strip()
     try:
         parsed = json.loads(cleaned)
@@ -98,7 +96,6 @@ def parse_qa_response(content: str) -> list[dict]:
 
 
 def build_batch_request(record: dict, *, model: str, max_tokens: int) -> dict:
-    """Build a single OpenAI Batch API request object for one image record."""
     image_path = Path(record["image_path"])
     return {
         "custom_id": f"img-{record['image_id']}",
