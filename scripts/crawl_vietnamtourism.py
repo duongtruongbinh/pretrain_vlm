@@ -83,10 +83,11 @@ def extract_images_from_html(
         if not caption:
             parent_p = img.find_parent("p")
             if parent_p:
-                # Pattern 3: italic sibling in same <p>
-                el = parent_p.find(_ITALIC)
-                if el and not el.find("img"):
-                    caption = el.get_text(separator=" ", strip=True)
+                # Pattern 3: italic sibling in same <p> (iterate all to skip any that wrap img)
+                for el in parent_p.find_all(_ITALIC):
+                    if not el.find("img"):
+                        caption = el.get_text(separator=" ", strip=True)
+                        break
 
                 # Pattern 2: italic in next sibling <p>
                 if not caption:
