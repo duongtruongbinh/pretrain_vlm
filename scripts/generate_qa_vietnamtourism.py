@@ -102,7 +102,7 @@ def build_batch_request(record: dict, *, model: str, max_tokens: int) -> dict:
         "url": "/v1/chat/completions",
         "body": {
             "model": model,
-            "max_tokens": max_tokens,
+            "max_completion_tokens": max_tokens,
             "messages": [
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {
