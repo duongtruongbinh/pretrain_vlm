@@ -21,6 +21,8 @@ API_BASE = "https://public.vietnamtourism.gov.vn"
 # Images served from CDN: relative paths (/images/...) from API resolve under /vn/
 IMG_CDN = "https://images.vietnamtourism.gov.vn/vn"
 _VALID_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+# vietnamtourism.gov.vn uses <em> and <i> interchangeably for captions
+_ITALIC = ["em", "i"]
 
 
 def build_api_url(cat_id: int, page: int, lang: str = "vi") -> tuple[str, dict]:
@@ -67,34 +69,32 @@ def extract_images_from_html(
 
         src = _resolve_img_src(src, cdn_base)
 
-        # Three caption patterns used by vietnamtourism.gov.vn:
-        # 1. <em> wraps <img> + text: <p><em><img><br>caption</em></p>
-        # 2. caption in next <p>:     <p><img></p><p><em>caption</em></p>
-        # 3. <em> sibling after <br>: <p><a><img></a><br><em>caption</em></p>
+        # Three caption patterns (site uses <em> and <i> interchangeably):
+        # 1. italic tag is ancestor of img:  <p><em><img><br>caption</em></p>
+        # 2. caption in next sibling <p>:    <p><img></p><p><em|i>caption</em|i></p>
+        # 3. italic sibling in same <p>:     <p><a><img></a><br><em|i>caption</em|i></p>
         caption = ""
 
         # Pattern 1
-        em = img.find_parent("em")
-        if em:
-            caption = em.get_text(separator=" ", strip=True)
+        italic_anc = img.find_parent(_ITALIC)
+        if italic_anc:
+            caption = italic_anc.get_text(separator=" ", strip=True)
 
-        # Pattern 3: <em> sibling inside the same <p>
         if not caption:
             parent_p = img.find_parent("p")
             if parent_p:
-                em_sibling = parent_p.find("em")
-                if em_sibling and not em_sibling.find("img"):
-                    caption = em_sibling.get_text(separator=" ", strip=True)
+                # Pattern 3: italic sibling in same <p>
+                el = parent_p.find(_ITALIC)
+                if el and not el.find("img"):
+                    caption = el.get_text(separator=" ", strip=True)
 
-        # Pattern 2: caption in next sibling <p><em>
-        if not caption:
-            parent_p = img.find_parent("p")
-            if parent_p:
-                next_p = parent_p.find_next_sibling("p")
-                if next_p and not next_p.find("img"):
-                    em_in_next = next_p.find("em")
-                    if em_in_next:
-                        caption = em_in_next.get_text(separator=" ", strip=True)
+                # Pattern 2: italic in next sibling <p>
+                if not caption:
+                    next_p = parent_p.find_next_sibling("p")
+                    if next_p and not next_p.find("img"):
+                        el = next_p.find(_ITALIC)
+                        if el:
+                            caption = el.get_text(separator=" ", strip=True)
 
         if not caption:
             caption = img.get("alt", "").strip()
