@@ -57,3 +57,6 @@ Thumbs.db
 
 # Superpowers plugin docs
 docs/superpowers/
+
+# Environment variables
+.env

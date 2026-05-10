@@ -45,10 +45,14 @@ def _clean_caption(caption: str) -> str:
     caption = caption.replace("\xa0", " ").strip()
     # Parenthesized notes first — prevents bare-credit regex eating inside "(Ảnh: ...)"
     caption = re.sub(r"\s*\([Ảả]nh[^)]*\)\s*$", "", caption).strip()
-    # Bare credit: uppercase "Ảnh:" only — "Trong ảnh:" uses lowercase and is kept
+    # Credit with colon: "Ảnh: ..." (uppercase only — "Trong ảnh:" uses lowercase)
     caption = re.sub(r"[,\s]*[-–]?\s*Ảnh\s*:\s*[^\n]*$", "", caption).strip()
-    # Standalone illustrative-photo markers
-    if re.fullmatch(r"[Ảả]nh\s+minh\s+\S+", caption):
+    # Credit without colon: ". Ảnh Name" (lookbehind keeps the period) / ", ảnh Name"
+    # Safe: "cảnh", "chụp ảnh", "hình ảnh" are preceded by letters/spaces, not "." or ","
+    caption = re.sub(r"(?<=\.)\s*[Ảả]nh\s+\S[^\n]*$", "", caption).strip()
+    caption = re.sub(r",\s*[Ảả]nh\s+\S[^\n]*$", "", caption).strip()
+    # Standalone credit-only caption: "Ảnh TITC", "Ảnh minh họa/Nguồn: ..." etc.
+    if re.fullmatch(r"[Ảả]nh(\s+\S[^\n]*)?", caption):
         return ""
     return caption
 
