@@ -149,7 +149,8 @@ def main() -> None:
                 line = line.strip()
                 if line:
                     crawled_ids.add(json.loads(line)["image_id"])
-    print(f"[crawl] resuming — {len(crawled_ids)} images already crawled")
+    already_crawled = len(crawled_ids)
+    print(f"[crawl] resuming — {already_crawled} images already crawled")
 
     session = requests.Session()
     session.headers["User-Agent"] = "Mozilla/5.0 (research crawler)"
@@ -161,7 +162,7 @@ def main() -> None:
         while True:
             if max_pages is not None and page > int(max_pages):
                 break
-            if total_new + len(crawled_ids) >= max_images:
+            if total_new + already_crawled >= max_images:
                 print(f"[crawl] reached max_images={max_images}, stopping")
                 break
 
@@ -177,7 +178,7 @@ def main() -> None:
                 break
 
             for post in posts:
-                if total_new + len(crawled_ids) >= max_images:
+                if total_new + already_crawled >= max_images:
                     break
 
                 post_id = str(post["id"])
@@ -188,7 +189,7 @@ def main() -> None:
                 for img_info in extract_images_from_html(
                     post.get("content", ""), base_url="", min_width=min_width
                 ):
-                    if total_new + len(crawled_ids) >= max_images:
+                    if total_new + already_crawled >= max_images:
                         break
 
                     image_id = make_image_id(post_id, img_info["src"])
