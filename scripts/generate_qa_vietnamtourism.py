@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
 import sys
 import time
@@ -165,7 +166,10 @@ def main() -> None:
     )
     print(f"[qa-gen] {len(valid)} requests → {batch_input}")
 
-    client = openai.OpenAI()
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise EnvironmentError("OPENAI_API_KEY environment variable is not set")
+    client = openai.OpenAI(api_key=api_key)
 
     print("[qa-gen] uploading batch input ...")
     with batch_input.open("rb") as fh:
