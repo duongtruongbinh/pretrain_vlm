@@ -2,6 +2,10 @@
 from __future__ import annotations
 
 import hashlib
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import json
 import re
 import time
@@ -63,11 +67,35 @@ def extract_images_from_html(
 
         src = _resolve_img_src(src, cdn_base)
 
-        # Caption: text of the nearest enclosing <em>, minus the img tag itself
+        # Three caption patterns used by vietnamtourism.gov.vn:
+        # 1. <em> wraps <img> + text: <p><em><img><br>caption</em></p>
+        # 2. caption in next <p>:     <p><img></p><p><em>caption</em></p>
+        # 3. <em> sibling after <br>: <p><a><img></a><br><em>caption</em></p>
         caption = ""
+
+        # Pattern 1
         em = img.find_parent("em")
         if em:
             caption = em.get_text(separator=" ", strip=True)
+
+        # Pattern 3: <em> sibling inside the same <p>
+        if not caption:
+            parent_p = img.find_parent("p")
+            if parent_p:
+                em_sibling = parent_p.find("em")
+                if em_sibling and not em_sibling.find("img"):
+                    caption = em_sibling.get_text(separator=" ", strip=True)
+
+        # Pattern 2: caption in next sibling <p><em>
+        if not caption:
+            parent_p = img.find_parent("p")
+            if parent_p:
+                next_p = parent_p.find_next_sibling("p")
+                if next_p and not next_p.find("img"):
+                    em_in_next = next_p.find("em")
+                    if em_in_next:
+                        caption = em_in_next.get_text(separator=" ", strip=True)
+
         if not caption:
             caption = img.get("alt", "").strip()
 
