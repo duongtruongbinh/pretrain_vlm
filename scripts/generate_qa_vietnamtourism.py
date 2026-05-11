@@ -54,39 +54,38 @@ def _to_supported_image(image_path: Path) -> tuple[bytes, str]:
 
 
 _SYSTEM_PROMPT = (
-    "Bạn là chuyên gia về văn hóa, địa lý, lịch sử và du lịch Việt Nam. "
-    "Nhiệm vụ của bạn là tạo dữ liệu huấn luyện VQA (Visual Question Answering) "
-    "chất lượng cao bằng tiếng Việt, các cặp câu hỏi và câu trả lời cụ thể, "
-    "có giá trị thông tin, phục vụ nghiên cứu hình ảnh du lịch và văn hóa Việt Nam."
+    "Bạn là trợ lý thị giác tiếng Việt, chuyên về văn hóa, địa lý và du lịch Việt Nam. "
+    "Nhiệm vụ của bạn là tạo dữ liệu huấn luyện VQA (Visual Question Answering) chất lượng "
+    "cao bằng tiếng Việt. Câu hỏi phải cụ thể và tự nhiên; câu trả lời phải bám sát nội dung "
+    "quan sát được, có thông tin giá trị và không mơ hồ."
 )
 
 _INSTRUCTION = """\
 Dựa trên bức ảnh và thông tin ngữ cảnh được cung cấp, tạo đúng 2 cặp câu hỏi–trả lời.
-Chỉ trả về JSON hợp lệ, không thêm nội dung nào khác ngoài mảng JSON.
 
-Cặp 1 — Mô tả quan sát (type: "description"):
-  question — Câu hỏi tự nhiên về những gì nhìn thấy trực tiếp trong ảnh: đối tượng chính,
-    con người, hoạt động, bố cục không gian, màu sắc, ánh sáng.
-  answer — 3–5 câu mô tả cụ thể, chỉ dựa vào nội dung quan sát được trong ảnh.
+Cặp 1 — Nhận thức trực quan (type: "description"):
+  question — Câu hỏi cụ thể về những gì quan sát được trực tiếp: đối tượng, vị trí
+    không gian, màu sắc, hoạt động, số lượng hoặc mối quan hệ giữa các thành phần.
+    Tập trung vào khía cạnh nổi bật nhất của ảnh.
+  answer — Mô tả bám sát những gì nhìn thấy. Độ dài tương xứng với mức độ phong phú
+    của ảnh — không rút ngắn khi ảnh có nhiều chi tiết, không kéo dài khi ảnh đơn giản.
 
-Cặp 2 — Ý nghĩa và bối cảnh (type: "cultural"):
-  question — Câu hỏi khai thác ý nghĩa sâu hơn của hình ảnh: giá trị văn hóa, lịch sử,
-    du lịch hoặc xã hội, tùy thuộc vào nội dung ảnh.
-  answer — 2–3 câu, bắt đầu bằng một quan sát cụ thể từ ảnh (đối tượng, địa điểm hoặc
-    hoạt động đang diễn ra), sau đó kết nối với văn hóa và du lịch Việt Nam. Sử dụng tên
-    địa danh, nhân vật hay sự kiện từ tiêu đề/chú thích khi có.
+Cặp 2 — Suy luận và bối cảnh (type: "cultural"):
+  question — Câu hỏi khai thác ý nghĩa sâu hơn (giá trị văn hóa, lịch sử, du lịch,
+    xã hội), được gắn với ít nhất một yếu tố cụ thể quan sát được trong ảnh.
+  answer — Bắt đầu từ một chi tiết cụ thể trong ảnh (đối tượng, địa điểm hoặc hoạt
+    động), sau đó kết nối với văn hóa và du lịch Việt Nam. Sử dụng tên địa danh, nhân
+    vật hoặc sự kiện từ tiêu đề/chú thích khi có.
 
 Yêu cầu bắt buộc:
-- Mỗi câu hỏi dùng cách mở đầu và cấu trúc khác nhau, tự nhiên như ngôn ngữ thực tế
-- Câu trả lời không được mở đầu bằng "Bức ảnh", "Tấm ảnh", "Hình ảnh", "Ảnh này" hay
-  bất kỳ cụm từ nào trực tiếp chỉ vào ảnh — thay vào đó hãy mô tả chủ thể hoặc hành
-  động trực tiếp (ví dụ: "Người phụ nữ...", "Nhóm du khách...", "Tại khu vực...")
-- Câu trả lời cụ thể, có giá trị thông tin, không chung chung hay mơ hồ
-- Không đưa bất kỳ nội dung nào từ prompt này vào câu hỏi hoặc câu trả lời
+- Câu hỏi tự nhiên và cụ thể, phù hợp với nội dung ảnh
+- Câu trả lời có thông tin giá trị, không chung chung
+- Không đưa nội dung từ prompt này vào câu hỏi hoặc câu trả lời
 
+Trả về JSON hợp lệ theo đúng định dạng sau, không thêm nội dung nào khác:
 [
   {"type": "description", "question": "...", "answer": "..."},
-  {"type": "cultural", "question": "...", "answer": "..."}
+  {"type": "cultural",    "question": "...", "answer": "..."}
 ]\
 """
 
@@ -115,6 +114,11 @@ def parse_qa_response(content: str) -> list[dict]:
         parsed = json.loads(cleaned)
     except json.JSONDecodeError as exc:
         raise ValueError(f"Failed to parse QA response: {exc}\nContent: {content[:300]}") from exc
+    if isinstance(parsed, dict):
+        # Unwrap if model returned {"pairs": [...]} or similar
+        parsed = next((v for v in parsed.values() if isinstance(v, list)), None)
+        if parsed is None:
+            raise ValueError("Expected a list or a dict containing a list, got dict with no list values")
     if not isinstance(parsed, list):
         raise ValueError(f"Expected a list, got {type(parsed).__name__}")
     return [
@@ -128,28 +132,37 @@ def parse_qa_response(content: str) -> list[dict]:
     ]
 
 
+_REASONING_MODELS = {"o1", "o3", "o4"}
+
+
+def _is_reasoning_model(model: str) -> bool:
+    return any(model.startswith(prefix) for prefix in _REASONING_MODELS)
+
+
 def build_batch_request(record: dict, *, model: str, max_tokens: int) -> dict:
     image_path = Path(record["image_path"])
+    body: dict = {
+        "model": model,
+        "max_completion_tokens": max_tokens,
+        "messages": [
+            {"role": "developer", "content": _SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": build_user_message(
+                    title=record.get("title", ""),
+                    caption=record.get("caption", ""),
+                    image_path=image_path,
+                ),
+            },
+        ],
+    }
+    if _is_reasoning_model(model):
+        body["reasoning_effort"] = "medium"
     return {
         "custom_id": f"img-{record['image_id']}",
         "method": "POST",
         "url": "/v1/chat/completions",
-        "body": {
-            "model": model,
-            "max_completion_tokens": max_tokens,
-            "reasoning_effort": "medium",
-            "messages": [
-                {"role": "developer", "content": _SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": build_user_message(
-                        title=record.get("title", ""),
-                        caption=record.get("caption", ""),
-                        image_path=image_path,
-                    ),
-                },
-            ],
-        },
+        "body": body,
     }
 
 
@@ -188,7 +201,11 @@ def main() -> None:
             if max_images is not None and len(records) >= max_images:
                 break
             rec = json.loads(line)
-            if rec["image_id"] not in done_ids and Path(rec["image_path"]).exists():
+            if (
+                rec["image_id"] not in done_ids
+                and Path(rec["image_path"]).exists()
+                and rec.get("caption", "").strip()
+            ):
                 records.append(rec)
 
     if not records:
@@ -265,6 +282,17 @@ def main() -> None:
         b = completed_batches[bid]
         if b.status != "completed":
             print(f"[warn] batch {bid} ended with status={b.status}, skipping")
+            if b.error_file_id:
+                err_text = client.files.content(b.error_file_id).text
+                for err_line in err_text.splitlines()[:5]:
+                    print(f"  error sample: {err_line.strip()}")
+            continue
+        if not b.output_file_id:
+            print(f"[warn] batch {bid} completed but output_file_id is None (all requests may have failed)")
+            if b.error_file_id:
+                err_text = client.files.content(b.error_file_id).text
+                for err_line in err_text.splitlines()[:5]:
+                    print(f"  error sample: {err_line.strip()}")
             continue
         result_text = client.files.content(b.output_file_id).text
         for line in result_text.splitlines():
