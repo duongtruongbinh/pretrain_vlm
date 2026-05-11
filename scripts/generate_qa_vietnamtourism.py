@@ -54,54 +54,41 @@ def _to_supported_image(image_path: Path) -> tuple[bytes, str]:
 
 
 _SYSTEM_PROMPT = (
-    "Bạn là trợ lý thị giác tiếng Việt, chuyên về văn hóa, địa lý và du lịch Việt Nam. "
-    "Nhiệm vụ của bạn là tạo dữ liệu huấn luyện hội thoại thị giác chất lượng cao bằng tiếng Việt. "
-    "Câu hỏi phải cụ thể, tự nhiên và có tính nối tiếp; câu trả lời phải bám sát ảnh, đồng thời "
-    "chỉ sử dụng tiêu đề/chú thích khi cần bổ sung bối cảnh du lịch hoặc văn hóa."
+    "Bạn là trợ lý thị giác tiếng Việt đang nhìn thấy một bức ảnh. "
+    "Trả lời mọi câu hỏi bằng cách bạn đang thực sự quan sát ảnh đó."
 )
 
 _INSTRUCTION = """\
-Dựa trên bức ảnh và thông tin ngữ cảnh được cung cấp, thực hiện hai việc sau.
+Nhìn vào bức ảnh và ngữ cảnh bên dưới, thiết kế một hội thoại 3 lượt tự nhiên giữa
+user và assistant về bức ảnh này.
 
-Phần 1 — Mô tả ảnh (description):
-Viết một đoạn mô tả chi tiết kết hợp những gì nhìn thấy trong ảnh với thông tin từ
-tiêu đề và chú thích: con người, đối tượng, hành động, màu sắc, bố cục không gian,
-tên địa danh/nhân vật/sự kiện nếu có trong ngữ cảnh.
+Mỗi câu hỏi của user PHẢI đáp ứng đồng thời ba điều kiện:
+(1) Là câu hỏi thực sự (kết thúc bằng "?"), không phải lệnh như "Hãy...", "Đề xuất..."
+(2) Bắt buộc phải nhìn thấy ảnh mới trả lời được — nếu chỉ đọc tiêu đề/chú thích mà
+    không thấy ảnh thì không thể trả lời chính xác
+(3) Không đặt câu hỏi trực tiếp từ nội dung tiêu đề/chú thích — tiêu đề/chú thích chỉ
+    dùng làm tham khảo cho câu trả lời, không phải nguồn để đặt câu hỏi
 
-Phần 2 — Sinh một hội thoại tự nhiên 3 lượt (conversation):
-Tạo đúng 3 lượt user-assistant, tức 6 message xen kẽ user/assistant. Hội thoại phải giống
-một người đang hỏi tiếp sau từng câu trả lời, không phải 3 câu QA độc lập đặt cạnh nhau.
+Trước khi viết mỗi câu hỏi, tự kiểm tra: "Nếu tôi che ảnh đi và chỉ đọc tiêu đề/chú thích
+hoặc dựa vào kiến thức chung, tôi có thể trả lời câu này không?" — Nếu có, bỏ câu đó và
+đặt câu hỏi khác gắn với chi tiết nhìn thấy trong ảnh.
 
-Lượt 1 — Tổng quan thị giác:
-  user hỏi mô tả tổng quan ảnh.
-  assistant trả lời chi tiết các yếu tố nổi bật trong ảnh.
+Câu hỏi có thể về: số lượng đối tượng, màu sắc, vị trí không gian, hành động, trang phục,
+biểu cảm, hoặc ý nghĩa văn hóa/du lịch gắn với chi tiết nhìn thấy trong ảnh.
+Ít nhất một lượt khai thác ý nghĩa văn hóa hoặc du lịch Việt Nam.
+Câu hỏi từ lượt 2 trở đi phải nối tiếp nội dung đã nói ở lượt trước.
+Câu trả lời phức tạp nên có giải thích cụ thể. Nếu hỏi về thứ không có trong ảnh,
+assistant trả lời phủ định thay vì bịa đặt.
 
-Lượt 2 — Chi tiết thị giác nối tiếp:
-  user hỏi tiếp về một chi tiết đã được assistant nhắc ở lượt 1.
-  assistant trả lời dựa trên quan sát trong ảnh.
-
-Lượt 3 — Bối cảnh du lịch/văn hóa:
-  user hỏi ý nghĩa du lịch, văn hóa, lịch sử hoặc xã hội của chi tiết/địa điểm/sự kiện đó.
-  assistant kết nối ảnh với tiêu đề/chú thích. Nếu thông tin đến từ ngữ cảnh, hãy nói rõ
-  bằng cách diễn đạt rõ ràng ngữ cảnh.
-
-Yêu cầu bắt buộc:
-- Câu hỏi tự nhiên và cụ thể, phù hợp với nội dung ảnh
-- Câu hỏi từ lượt 2 trở đi phải nối tiếp nội dung đã nói trước đó
-- Câu trả lời có thông tin giá trị, không chung chung
-- Không khẳng định tên người/địa điểm/sự kiện nếu chỉ ảnh không đủ chứng cứ; hãy gắn với
-  tiêu đề/chú thích khi dùng thông tin đó
-- Không đưa nội dung từ prompt này vào câu hỏi hoặc câu trả lời
-
-Trả về JSON hợp lệ theo đúng định dạng sau, không thêm nội dung nào khác:
+Trả về JSON hợp lệ, không thêm nội dung nào khác:
 {
-  "description": "...",
+  "description": "mô tả chi tiết bức ảnh kết hợp tiêu đề/chú thích",
   "conversation": [
-    {"role": "user", "content": "..."},
+    {"role": "user", "content": "...?"},
     {"role": "assistant", "content": "..."},
-    {"role": "user", "content": "..."},
+    {"role": "user", "content": "...?"},
     {"role": "assistant", "content": "..."},
-    {"role": "user", "content": "..."},
+    {"role": "user", "content": "...?"},
     {"role": "assistant", "content": "..."}
   ]
 }\
