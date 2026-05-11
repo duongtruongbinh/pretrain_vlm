@@ -8,6 +8,7 @@ Prompt design references:
 from __future__ import annotations
 
 import base64
+import io
 import json
 import os
 import re
@@ -16,44 +17,77 @@ import time
 from pathlib import Path
 
 from dotenv import load_dotenv
+from PIL import Image
 
 load_dotenv()
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.runtime import load_config
+from src.runtime import append_jsonl, load_config
 
 _MEDIA_TYPES: dict[str, str] = {
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
     ".png": "image/png",
     ".webp": "image/webp",
+    ".gif": "image/gif",
 }
 
+_OPENAI_SUPPORTED_FORMATS = {"JPEG", "PNG", "WEBP", "GIF"}
+
+
+def _to_supported_image(image_path: Path) -> tuple[bytes, str]:
+    """Return (bytes, media_type), converting to JPEG if the format is unsupported by OpenAI."""
+    raw = image_path.read_bytes()
+    img = Image.open(io.BytesIO(raw))
+    if img.format in _OPENAI_SUPPORTED_FORMATS:
+        return raw, _MEDIA_TYPES.get(image_path.suffix.lower(), "image/jpeg")
+    if img.mode == "RGBA":
+        bg = Image.new("RGB", img.size, (255, 255, 255))
+        bg.paste(img, mask=img.getchannel("A"))
+        img = bg
+    elif img.mode != "RGB":
+        img = img.convert("RGB")
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=85)
+    return buf.getvalue(), "image/jpeg"
+
+
 _SYSTEM_PROMPT = (
-    "Bạn là chuyên gia văn hóa, địa lý và du lịch Việt Nam với kiến thức sâu rộng "
-    "về cảnh quan, phong tục, lịch sử và ẩm thực Việt Nam. Nhiệm vụ của bạn là tạo "
-    "các cặp câu hỏi-trả lời chất lượng cao bằng tiếng Việt về hình ảnh du lịch, "
-    "chỉ dựa trên những gì quan sát được trong ảnh và thông tin ngữ cảnh được cung cấp."
+    "Bạn là chuyên gia về văn hóa, địa lý, lịch sử và du lịch Việt Nam. "
+    "Nhiệm vụ của bạn là tạo dữ liệu huấn luyện VQA (Visual Question Answering) "
+    "chất lượng cao bằng tiếng Việt, các cặp câu hỏi và câu trả lời cụ thể, "
+    "có giá trị thông tin, phục vụ nghiên cứu hình ảnh du lịch và văn hóa Việt Nam."
 )
 
 _INSTRUCTION = """\
-Tạo đúng 2 cặp câu hỏi-trả lời về bức ảnh theo 2 loại sau.
-Trả về JSON hợp lệ (không thêm bất kỳ nội dung nào ngoài JSON):
+Dựa trên bức ảnh và thông tin ngữ cảnh được cung cấp, tạo đúng 2 cặp câu hỏi–trả lời.
+Chỉ trả về JSON hợp lệ, không thêm nội dung nào khác ngoài mảng JSON.
 
-[
-  {"type": "description",
-   "question": "<hỏi mô tả tổng thể: cảnh vật, con người, màu sắc, bố cục không gian>",
-   "answer":   "<3–5 câu: vật thể chính, màu sắc, vị trí tương đối, hoạt động, ánh sáng/thời tiết>"},
-  {"type": "cultural",
-   "question": "<hỏi về ý nghĩa văn hóa, lễ hội, phong tục, ẩm thực hoặc kiến trúc đặc trưng Việt Nam>",
-   "answer":   "<2–3 câu kết nối nội dung ảnh với bối cảnh văn hóa-du lịch Việt Nam>"}
-]
+Cặp 1 — Mô tả quan sát (type: "description"):
+  question — Câu hỏi tự nhiên về những gì nhìn thấy trực tiếp trong ảnh: đối tượng chính,
+    con người, hoạt động, bố cục không gian, màu sắc, ánh sáng.
+  answer — 3–5 câu mô tả cụ thể, chỉ dựa vào nội dung quan sát được trong ảnh.
+
+Cặp 2 — Ý nghĩa và bối cảnh (type: "cultural"):
+  question — Câu hỏi khai thác ý nghĩa sâu hơn của hình ảnh: giá trị văn hóa, lịch sử,
+    du lịch hoặc xã hội, tùy thuộc vào nội dung ảnh.
+  answer — 2–3 câu, bắt đầu bằng một quan sát cụ thể từ ảnh (đối tượng, địa điểm hoặc
+    hoạt động đang diễn ra), sau đó kết nối với văn hóa và du lịch Việt Nam. Sử dụng tên
+    địa danh, nhân vật hay sự kiện từ tiêu đề/chú thích khi có.
 
 Yêu cầu bắt buộc:
-- Câu hỏi đa dạng cách hỏi, tự nhiên (không lặp cùng công thức như "Trong ảnh có gì?")
-- Chỉ đề cập những gì thực sự thấy được trong ảnh hoặc có trong tiêu đề/chú thích
-- Câu trả lời cụ thể và thông tin, tránh chung chung và mơ hồ\
+- Mỗi câu hỏi dùng cách mở đầu và cấu trúc khác nhau, tự nhiên như ngôn ngữ thực tế
+- Câu trả lời không được mở đầu bằng "Bức ảnh", "Tấm ảnh", "Hình ảnh", "Ảnh này" hay
+  bất kỳ cụm từ nào trực tiếp chỉ vào ảnh — thay vào đó hãy mô tả chủ thể hoặc hành
+  động trực tiếp (ví dụ: "Người phụ nữ...", "Nhóm du khách...", "Tại khu vực...")
+- Câu trả lời cụ thể, có giá trị thông tin, không chung chung hay mơ hồ
+- Không đưa bất kỳ nội dung nào từ prompt này vào câu hỏi hoặc câu trả lời
+
+[
+  {"type": "description", "question": "...", "answer": "..."},
+  {"type": "cultural", "question": "...", "answer": "..."}
+]\
 """
 
 
@@ -66,8 +100,8 @@ def build_user_message(title: str, caption: str, image_path: Path) -> list[dict]
 
     text = "\n".join(context + ["", _INSTRUCTION]) if context else _INSTRUCTION
 
-    b64 = base64.standard_b64encode(image_path.read_bytes()).decode()
-    media_type = _MEDIA_TYPES.get(image_path.suffix.lower(), "image/jpeg")
+    img_bytes, media_type = _to_supported_image(image_path)
+    b64 = base64.standard_b64encode(img_bytes).decode()
 
     return [
         {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{b64}"}},
@@ -103,8 +137,9 @@ def build_batch_request(record: dict, *, model: str, max_tokens: int) -> dict:
         "body": {
             "model": model,
             "max_completion_tokens": max_tokens,
+            "reasoning_effort": "medium",
             "messages": [
-                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "developer", "content": _SYSTEM_PROMPT},
                 {
                     "role": "user",
                     "content": build_user_message(
@@ -130,7 +165,6 @@ def main() -> None:
         max_images = int(max_images)
 
     raw_jsonl = raw_dir / "raw_crawl.jsonl"
-    batch_input = raw_dir / "batch_input.jsonl"
     batch_results = raw_dir / "batch_results.jsonl"
 
     if not raw_jsonl.exists():
@@ -148,11 +182,11 @@ def main() -> None:
     records: list[dict] = []
     with raw_jsonl.open(encoding="utf-8") as fh:
         for line in fh:
-            if max_images is not None and len(records) >= max_images:
-                break
             line = line.strip()
             if not line:
                 continue
+            if max_images is not None and len(records) >= max_images:
+                break
             rec = json.loads(line)
             if rec["image_id"] not in done_ids and Path(rec["image_path"]).exists():
                 records.append(rec)
@@ -169,48 +203,70 @@ def main() -> None:
         except Exception as exc:
             print(f"[warn] skipping {rec['image_id']}: {exc}")
 
-    batch_input.write_text(
-        "\n".join(json.dumps(req, ensure_ascii=False) for _, req in valid),
-        encoding="utf-8",
-    )
-    print(f"[qa-gen] {len(valid)} requests → {batch_input}")
-
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise EnvironmentError("OPENAI_API_KEY environment variable is not set")
     client = openai.OpenAI(api_key=api_key)
 
-    print("[qa-gen] uploading batch input ...")
-    with batch_input.open("rb") as fh:
-        uploaded = client.files.create(file=fh, purpose="batch")
-    print(f"[qa-gen] uploaded file: {uploaded.id}")
+    # Chunk by serialised byte size to stay under OpenAI's 200 MB batch file limit.
+    max_chunk_bytes = int(cfg.get("batch_chunk_mb", 150)) * 1024 * 1024
+    chunks: list[list[tuple[dict, dict]]] = [[]]
+    chunk_bytes = 0
+    for pair in valid:
+        line_bytes = len(json.dumps(pair[1], ensure_ascii=False).encode())
+        if chunk_bytes + line_bytes > max_chunk_bytes and chunks[-1]:
+            chunks.append([])
+            chunk_bytes = 0
+        chunks[-1].append(pair)
+        chunk_bytes += line_bytes
+    print(f"[qa-gen] splitting into {len(chunks)} batch(es) (≤{max_chunk_bytes // 1024 // 1024} MB each) ...")
 
-    batch = client.batches.create(
-        input_file_id=uploaded.id,
-        endpoint="/v1/chat/completions",
-        completion_window="24h",
-    )
-    print(f"[qa-gen] batch created: {batch.id}")
+    submitted_ids: list[str] = []
+    for i, chunk in enumerate(chunks):
+        chunk_path = raw_dir / f"batch_input_{i:03d}.jsonl"
+        chunk_path.write_text(
+            "\n".join(json.dumps(req, ensure_ascii=False) for _, req in chunk),
+            encoding="utf-8",
+        )
+        with chunk_path.open("rb") as fh:
+            uploaded = client.files.create(file=fh, purpose="batch")
+        batch = client.batches.create(
+            input_file_id=uploaded.id,
+            endpoint="/v1/chat/completions",
+            completion_window="24h",
+        )
+        print(f"[qa-gen] chunk {i + 1}/{len(chunks)} ({len(chunk)} reqs) → {batch.id}")
+        submitted_ids.append(batch.id)
 
     print("[qa-gen] polling (may take minutes to hours) ...")
-    while True:
-        batch = client.batches.retrieve(batch.id)
-        counts = batch.request_counts
-        completed = getattr(counts, "completed", "?")
-        total = getattr(counts, "total", "?")
-        print(f"  status={batch.status} completed={completed}/{total}", flush=True)
-        if batch.status in ("completed", "failed", "expired", "cancelled"):
-            break
-        time.sleep(60)
+    pending = list(submitted_ids)
+    completed_batches: dict[str, object] = {}
+    while pending:
+        still_pending = []
+        for bid in pending:
+            b = client.batches.retrieve(bid)
+            counts = b.request_counts
+            print(
+                f"  [{bid[-12:]}] status={b.status}"
+                f" completed={getattr(counts, 'completed', '?')}/{getattr(counts, 'total', '?')}",
+                flush=True,
+            )
+            if b.status in ("completed", "failed", "expired", "cancelled"):
+                completed_batches[bid] = b
+            else:
+                still_pending.append(bid)
+        pending = still_pending
+        if pending:
+            time.sleep(60)
 
-    if batch.status != "completed":
-        raise RuntimeError(f"Batch ended with status={batch.status}")
-
-    result_text = client.files.content(batch.output_file_id).text
     id_to_record = {f"img-{rec['image_id']}": rec for rec in records}
-
     saved = 0
-    with batch_results.open("a", encoding="utf-8") as out:
+    for bid in submitted_ids:
+        b = completed_batches[bid]
+        if b.status != "completed":
+            print(f"[warn] batch {bid} ended with status={b.status}, skipping")
+            continue
+        result_text = client.files.content(b.output_file_id).text
         for line in result_text.splitlines():
             line = line.strip()
             if not line:
@@ -221,25 +277,28 @@ def main() -> None:
             if rec is None:
                 continue
             try:
-                content = result["response"]["body"]["choices"][0]["message"]["content"]
+                resp_body = result["response"]["body"]
+                if "error" in resp_body:
+                    raise ValueError(resp_body["error"].get("message", "api error"))
+                choice = resp_body["choices"][0]
+                content = choice["message"]["content"] or ""
+                if not content:
+                    raise ValueError(f"empty content (finish_reason={choice.get('finish_reason')})")
                 qa_pairs = parse_qa_response(content)
             except Exception as exc:
-                print(f"[warn] parse failed for {custom_id}: {exc}")
+                print(f"[warn] skipping {custom_id}: {exc}")
                 continue
-            out.write(
-                json.dumps(
-                    {
-                        "image_id": rec["image_id"],
-                        "image_path": rec["image_path"],
-                        "title": rec["title"],
-                        "caption": rec["caption"],
-                        "article_url": rec["article_url"],
-                        "date": rec["date"],
-                        "qa_pairs": qa_pairs,
-                    },
-                    ensure_ascii=False,
-                )
-                + "\n"
+            append_jsonl(
+                batch_results,
+                {
+                    "image_id": rec["image_id"],
+                    "image_path": rec["image_path"],
+                    "title": rec["title"],
+                    "caption": rec["caption"],
+                    "article_url": rec["article_url"],
+                    "date": rec["date"],
+                    "qa_pairs": qa_pairs,
+                },
             )
             saved += 1
 

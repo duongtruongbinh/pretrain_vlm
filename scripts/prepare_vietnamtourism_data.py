@@ -23,23 +23,22 @@ def assign_split(image_id: str, seed: int, val_ratio: float, test_ratio: float) 
     return "train"
 
 
-def build_instruction_sample(
+def build_instruction_entry(
     *,
     image_path: Path,
-    qa_pair: dict,
+    qa_pairs: list[dict],
     system_prompt: str,
     image_id: str,
     source: str,
-    sample_index: int,
 ) -> dict:
+    messages = [{"role": "system", "content": system_prompt}]
+    for qa in qa_pairs:
+        messages.append({"role": "user", "content": qa["question"]})
+        messages.append({"role": "assistant", "content": qa["answer"]})
     return {
-        "id": f"vntour_{image_id}_qa_{sample_index + 1:03d}",
+        "id": f"vntour_{image_id}",
         "image": str(image_path),
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": qa_pair["question"]},
-            {"role": "assistant", "content": qa_pair["answer"]},
-        ],
+        "messages": messages,
         "sample_type": "qa",
         "source_dataset": source,
         "image_id": image_id,
@@ -85,39 +84,40 @@ def main() -> None:
                 split = assign_split(image_id, seed=seed, val_ratio=val_ratio, test_ratio=test_ratio)
                 split_image_ids[split].add(image_id)
 
-                for idx, qa_pair in enumerate(rec.get("qa_pairs", [])):
-                    if not qa_pair.get("question") or not qa_pair.get("answer"):
-                        counters["skipped_empty_qa"] += 1
-                        continue
-                    sample = build_instruction_sample(
-                        image_path=image_path,
-                        qa_pair=qa_pair,
-                        system_prompt=system_prompt,
-                        image_id=image_id,
-                        source=source,
-                        sample_index=idx,
-                    )
-                    handles[split].write(json.dumps(sample, ensure_ascii=False) + "\n")
-                    counters[f"{split}_samples"] += 1
-                    counters["total_samples"] += 1
+                qa_pairs = [
+                    qa for qa in rec.get("qa_pairs", [])
+                    if qa.get("question") and qa.get("answer")
+                ]
+                if not qa_pairs:
+                    counters["skipped_empty_qa"] += 1
+                    continue
+
+                entry = build_instruction_entry(
+                    image_path=image_path,
+                    qa_pairs=qa_pairs,
+                    system_prompt=system_prompt,
+                    image_id=image_id,
+                    source=source,
+                )
+                handles[split].write(json.dumps(entry, ensure_ascii=False) + "\n")
+                counters[f"{split}_images"] += 1
+                counters["total_images"] += 1
     finally:
         for h in handles.values():
             h.close()
 
     print("[prepare] done")
     for split in ("train", "val", "test"):
-        print(
-            f"  {split}: {counters[f'{split}_samples']} samples "
-            f"from {len(split_image_ids[split])} images"
-        )
+        print(f"  {split}: {counters[f'{split}_images']} images → {split}.jsonl")
     print(f"  skipped missing images: {counters['skipped_missing_image']}")
+    print(f"  skipped empty qa:       {counters['skipped_empty_qa']}")
 
     (output_dir / "prepare_report.json").write_text(
         json.dumps(
             {
                 "source": source,
                 "counts": dict(counters),
-                "split_unique_images": {k: len(v) for k, v in split_image_ids.items()},
+                "split_images": {k: len(v) for k, v in split_image_ids.items()},
             },
             ensure_ascii=False,
             indent=2,
