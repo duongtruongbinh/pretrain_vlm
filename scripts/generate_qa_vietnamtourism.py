@@ -61,14 +61,20 @@ _SYSTEM_PROMPT = (
 )
 
 _INSTRUCTION = """\
-Dựa trên bức ảnh và thông tin ngữ cảnh được cung cấp, tạo đúng 2 cặp câu hỏi–trả lời.
+Dựa trên bức ảnh và thông tin ngữ cảnh được cung cấp, thực hiện hai việc sau.
+
+Phần 1 — Mô tả ảnh (description):
+Viết một đoạn mô tả chi tiết kết hợp những gì nhìn thấy trong ảnh với thông tin từ
+tiêu đề và chú thích: con người, đối tượng, hành động, màu sắc, bố cục không gian,
+tên địa danh/nhân vật/sự kiện nếu có trong ngữ cảnh.
+
+Phần 2 — Sinh đúng 2 cặp câu hỏi–trả lời (qa_pairs):
 
 Cặp 1 — Nhận thức trực quan (type: "description"):
-  question — Câu hỏi cụ thể về những gì quan sát được trực tiếp: đối tượng, vị trí
-    không gian, màu sắc, hoạt động, số lượng hoặc mối quan hệ giữa các thành phần.
-    Tập trung vào khía cạnh nổi bật nhất của ảnh.
-  answer — Mô tả bám sát những gì nhìn thấy. Độ dài tương xứng với mức độ phong phú
-    của ảnh — không rút ngắn khi ảnh có nhiều chi tiết, không kéo dài khi ảnh đơn giản.
+  question — Câu hỏi về nhiều yếu tố trong ảnh: đối tượng, vị trí không gian, màu sắc,
+    hoạt động và mối quan hệ giữa các thành phần.
+  answer — Mô tả chi tiết và đầy đủ những gì nhìn thấy, bao gồm tất cả các yếu tố nổi
+    bật trong ảnh.
 
 Cặp 2 — Suy luận và bối cảnh (type: "cultural"):
   question — Câu hỏi khai thác ý nghĩa sâu hơn (giá trị văn hóa, lịch sử, du lịch,
@@ -83,10 +89,13 @@ Yêu cầu bắt buộc:
 - Không đưa nội dung từ prompt này vào câu hỏi hoặc câu trả lời
 
 Trả về JSON hợp lệ theo đúng định dạng sau, không thêm nội dung nào khác:
-[
-  {"type": "description", "question": "...", "answer": "..."},
-  {"type": "cultural",    "question": "...", "answer": "..."}
-]\
+{
+  "description": "...",
+  "qa_pairs": [
+    {"type": "description", "question": "...", "answer": "..."},
+    {"type": "cultural",    "question": "...", "answer": "..."}
+  ]
+}\
 """
 
 
@@ -108,28 +117,28 @@ def build_user_message(title: str, caption: str, image_path: Path) -> list[dict]
     ]
 
 
-def parse_qa_response(content: str) -> list[dict]:
+def parse_qa_response(content: str) -> tuple[str, list[dict]]:
     cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip(), flags=re.MULTILINE).strip()
     try:
         parsed = json.loads(cleaned)
     except json.JSONDecodeError as exc:
         raise ValueError(f"Failed to parse QA response: {exc}\nContent: {content[:300]}") from exc
-    if isinstance(parsed, dict):
-        # Unwrap if model returned {"pairs": [...]} or similar
-        parsed = next((v for v in parsed.values() if isinstance(v, list)), None)
-        if parsed is None:
-            raise ValueError("Expected a list or a dict containing a list, got dict with no list values")
-    if not isinstance(parsed, list):
-        raise ValueError(f"Expected a list, got {type(parsed).__name__}")
-    return [
+    if not isinstance(parsed, dict):
+        raise ValueError(f"Expected a dict with 'description' and 'qa_pairs', got {type(parsed).__name__}")
+    description = str(parsed.get("description", "")).strip()
+    qa_list = parsed.get("qa_pairs")
+    if not isinstance(qa_list, list):
+        raise ValueError(f"Expected 'qa_pairs' to be a list, got {type(qa_list).__name__}")
+    qa_pairs = [
         {
             "type": str(item.get("type", "")),
             "question": str(item.get("question", "")).strip(),
             "answer": str(item.get("answer", "")).strip(),
         }
-        for item in parsed
+        for item in qa_list
         if isinstance(item, dict)
     ]
+    return description, qa_pairs
 
 
 _REASONING_MODELS = {"o1", "o3", "o4"}
@@ -312,7 +321,7 @@ def main() -> None:
                 content = choice["message"]["content"] or ""
                 if not content:
                     raise ValueError(f"empty content (finish_reason={choice.get('finish_reason')})")
-                qa_pairs = parse_qa_response(content)
+                description, qa_pairs = parse_qa_response(content)
             except Exception as exc:
                 print(f"[warn] skipping {custom_id}: {exc}")
                 continue
@@ -325,6 +334,7 @@ def main() -> None:
                     "caption": rec["caption"],
                     "article_url": rec["article_url"],
                     "date": rec["date"],
+                    "description": description,
                     "qa_pairs": qa_pairs,
                 },
             )

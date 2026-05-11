@@ -228,28 +228,16 @@ def build_qna_samples(
     sample_id_prefix: str,
     source_dataset: str,
 ) -> list[dict]:
-    built_samples = []
-    conversation = [{"role": "system", "content": system_prompt}]
-
-    assistant_turn_index = 0
-    for message_index in range(0, len(qna_messages), 2):
-        user_message = qna_messages[message_index]
-        assistant_message = qna_messages[message_index + 1]
-        assistant_turn_index += 1
-
-        conversation.extend([user_message, assistant_message])
-        built_samples.append(
-            {
-                "id": f"{sample_id_prefix}_qa_{assistant_turn_index:03d}",
-                "image": str(image_path.resolve()),
-                "messages": [dict(message) for message in conversation],
-                "sample_type": "qa",
-                "source_dataset": source_dataset,
-                "image_id": image_key,
-            }
-        )
-
-    return built_samples
+    return [
+        {
+            "id": f"{sample_id_prefix}_qa",
+            "image": str(image_path.resolve()),
+            "messages": [{"role": "system", "content": system_prompt}, *qna_messages],
+            "sample_type": "qa",
+            "source_dataset": source_dataset,
+            "image_id": image_key,
+        }
+    ]
 
 
 def parse_args(argv: list[str] | None = None, *, default_config_section: str = DEFAULT_CONFIG_SECTION):
