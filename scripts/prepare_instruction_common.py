@@ -85,7 +85,7 @@ def normalize_qna_messages(raw_messages) -> list[dict[str, str]]:
     if not isinstance(raw_messages, list):
         raise ValueError("QnA field must be a list or a JSON-encoded list.")
     if len(raw_messages) % 2 != 0:
-        raise ValueError("QnA message list must contain an even number of user/assistant messages.")
+        raw_messages = raw_messages[:-1]  # drop trailing unpaired user message
 
     normalized_messages = []
     expected_role = "user"

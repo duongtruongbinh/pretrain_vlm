@@ -84,16 +84,29 @@ class InstructionCollator:
                 result.append(msg)
         return result
 
-    def _build_training_texts(self, messages, *, sample_id: str) -> tuple[str, str]:
+    def _build_training_texts(self, messages, *, sample_id: str) -> tuple[list[dict], str]:
         messages = self._inject_image_token(messages)
-
-        prompt_text = self.tokenizer.apply_chat_template(
-            messages[:-1], tokenize=False, add_generation_prompt=True
-        )
         full_text = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
-        if not full_text.startswith(prompt_text):
-            raise ValueError(f"Sample '{sample_id}' failed the prompt-prefix masking check.")
-        return prompt_text, full_text
+        if not full_text:
+            raise ValueError(f"Sample '{sample_id}' produced empty full text.")
+        return messages, full_text
+
+    def _assistant_token_spans(self, messages: list[dict]) -> list[tuple[int, int]]:
+        """Return (start, end) token index for every assistant turn in the conversation."""
+        spans = []
+        for i, msg in enumerate(messages):
+            if msg["role"] != "assistant":
+                continue
+            prefix = self.tokenizer.apply_chat_template(
+                messages[:i], tokenize=False, add_generation_prompt=True
+            ).replace(IMAGE_TOKEN, IMAGE_TOKEN * self._image_seq_length)
+            full = self.tokenizer.apply_chat_template(
+                messages[:i + 1], tokenize=False, add_generation_prompt=False
+            ).replace(IMAGE_TOKEN, IMAGE_TOKEN * self._image_seq_length)
+            start = len(self.tokenizer(prefix)["input_ids"])
+            end = len(self.tokenizer(full)["input_ids"])
+            spans.append((start, end))
+        return spans
 
     def build_prompt_tensors(self, messages, image, device=None):
         messages = self._inject_image_token(messages)
@@ -112,7 +125,7 @@ class InstructionCollator:
         valid = []
         for sample in batch:
             try:
-                prompt_text, full_text = self._build_training_texts(
+                injected_messages, full_text = self._build_training_texts(
                     sample["messages"], sample_id=sample["id"]
                 )
             except Exception as e:
@@ -121,7 +134,7 @@ class InstructionCollator:
             valid.append(
                 {
                     "pixel_image": sample["image"],
-                    "prompt_text": prompt_text,
+                    "messages": injected_messages,
                     "full_text": full_text,
                     "sample_id": sample["id"],
                 }
@@ -140,16 +153,15 @@ class InstructionCollator:
             max_length=self.max_text_tokens,
             return_tensors="pt",
         )
-        labels = encoded["input_ids"].clone()
-        labels[encoded["attention_mask"] == 0] = -100
+        seq_len = encoded["input_ids"].shape[1]
+        labels = torch.full_like(encoded["input_ids"], -100)
 
         for row, sample in enumerate(valid):
-            # text-only tokenization matches the batch-encoded prefix; avoids re-encoding the image
-            prompt_expanded = sample["prompt_text"].replace(
-                IMAGE_TOKEN, IMAGE_TOKEN * self._image_seq_length
-            )
-            prompt_len = len(self.tokenizer(prompt_expanded)["input_ids"])
-            labels[row, :prompt_len] = -100
+            # Supervise all assistant turns; mask system/user turns.
+            for start, end in self._assistant_token_spans(sample["messages"]):
+                end = min(end, seq_len)
+                if start < seq_len:
+                    labels[row, start:end] = encoded["input_ids"][row, start:end]
 
             if not torch.any(labels[row] != -100):
                 warnings.warn(
