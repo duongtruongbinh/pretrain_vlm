@@ -1,14 +1,13 @@
-"""Convert raw_crawl.jsonl + batch_results.jsonl to project instruction-tuning JSONL."""
+"""Convert raw crawl + generated conversations to project instruction-tuning JSONL."""
 from __future__ import annotations
 
 import hashlib
+import json
 import sys
+from collections import Counter, defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import json
-from collections import Counter, defaultdict
-from pathlib import Path
 
 from src.runtime import load_config
 
@@ -23,25 +22,82 @@ def assign_split(image_id: str, seed: int, val_ratio: float, test_ratio: float) 
     return "train"
 
 
+def normalize_conversation_messages(raw_messages) -> list[dict[str, str]]:
+    if raw_messages is None:
+        return []
+    if not isinstance(raw_messages, list):
+        raise ValueError("conversation must be a list.")
+    if len(raw_messages) % 2 != 0:
+        raw_messages = raw_messages[:-1]
+
+    normalized_messages: list[dict[str, str]] = []
+    expected_role = "user"
+    for index, message in enumerate(raw_messages):
+        if not isinstance(message, dict):
+            raise ValueError(f"conversation message #{index} must be a dict.")
+
+        role = str(message.get("role", "")).strip().lower()
+        content = str(message.get("content", "")).strip()
+        if role != expected_role:
+            raise ValueError(f"expected role '{expected_role}' at conversation message #{index}, got '{role}'.")
+        if not content:
+            raise ValueError(f"conversation message #{index} has empty content.")
+
+        normalized_messages.append({"role": role, "content": content})
+        expected_role = "assistant" if expected_role == "user" else "user"
+
+    return normalized_messages
+
+
+def qa_pairs_to_conversation(qa_pairs: list[dict]) -> list[dict[str, str]]:
+    messages: list[dict[str, str]] = []
+    for qa in qa_pairs:
+        if not isinstance(qa, dict):
+            continue
+        question = str(qa.get("question", "")).strip()
+        answer = str(qa.get("answer", "")).strip()
+        if not question or not answer:
+            continue
+        messages.append({"role": "user", "content": question})
+        messages.append({"role": "assistant", "content": answer})
+    return normalize_conversation_messages(messages)
+
+
+def conversation_from_record(record: dict) -> list[dict[str, str]]:
+    conversation = normalize_conversation_messages(record.get("conversation"))
+    if conversation:
+        return conversation
+    return qa_pairs_to_conversation(record.get("qa_pairs", []))
+
+
+
 def build_instruction_entry(
     *,
     image_path: Path,
-    qa_pairs: list[dict],
+    conversation: list[dict[str, str]],
     system_prompt: str,
     image_id: str,
     source: str,
+    title: str = "",
+    caption: str = "",
+    article_url: str = "",
+    date: str = "",
+    post_id: str = "",
 ) -> dict:
     messages = [{"role": "system", "content": system_prompt}]
-    for qa in qa_pairs:
-        messages.append({"role": "user", "content": qa["question"]})
-        messages.append({"role": "assistant", "content": qa["answer"]})
+    messages.extend(conversation)
     return {
         "id": f"vntour_{image_id}",
         "image": str(image_path),
         "messages": messages,
-        "sample_type": "qa",
+        "sample_type": "conversation",
         "source_dataset": source,
         "image_id": image_id,
+        "title": title,
+        "caption": caption,
+        "article_url": article_url,
+        "date": date,
+        "post_id": post_id,
     }
 
 
@@ -84,20 +140,27 @@ def main() -> None:
                 split = assign_split(image_id, seed=seed, val_ratio=val_ratio, test_ratio=test_ratio)
                 split_image_ids[split].add(image_id)
 
-                qa_pairs = [
-                    qa for qa in rec.get("qa_pairs", [])
-                    if qa.get("question") and qa.get("answer")
-                ]
-                if not qa_pairs:
-                    counters["skipped_empty_qa"] += 1
+                try:
+                    conversation = conversation_from_record(rec)
+                except ValueError as exc:
+                    counters["skipped_invalid_conversation"] += 1
+                    print(f"[warn] skipping {image_id}: {exc}")
+                    continue
+                if not conversation:
+                    counters["skipped_empty_conversation"] += 1
                     continue
 
                 entry = build_instruction_entry(
                     image_path=image_path,
-                    qa_pairs=qa_pairs,
+                    conversation=conversation,
                     system_prompt=system_prompt,
                     image_id=image_id,
                     source=source,
+                    title=rec.get("title", ""),
+                    caption=rec.get("caption", ""),
+                    article_url=rec.get("article_url", ""),
+                    date=rec.get("date", ""),
+                    post_id=rec.get("post_id", ""),
                 )
                 handles[split].write(json.dumps(entry, ensure_ascii=False) + "\n")
                 counters[f"{split}_images"] += 1
@@ -110,7 +173,8 @@ def main() -> None:
     for split in ("train", "val", "test"):
         print(f"  {split}: {counters[f'{split}_images']} images → {split}.jsonl")
     print(f"  skipped missing images: {counters['skipped_missing_image']}")
-    print(f"  skipped empty qa:       {counters['skipped_empty_qa']}")
+    print(f"  skipped empty conv:     {counters['skipped_empty_conversation']}")
+    print(f"  skipped invalid conv:   {counters['skipped_invalid_conversation']}")
 
     (output_dir / "prepare_report.json").write_text(
         json.dumps(

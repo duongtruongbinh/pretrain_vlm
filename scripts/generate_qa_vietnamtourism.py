@@ -1,4 +1,4 @@
-"""Generate QA pairs from crawled images via OpenAI Batch API.
+"""Generate coherent multi-turn conversations from crawled images via OpenAI Batch API.
 
 Prompt design references:
   - LLaVA (Liu et al., 2023): description + complex-reasoning instruction types
@@ -55,9 +55,9 @@ def _to_supported_image(image_path: Path) -> tuple[bytes, str]:
 
 _SYSTEM_PROMPT = (
     "Bạn là trợ lý thị giác tiếng Việt, chuyên về văn hóa, địa lý và du lịch Việt Nam. "
-    "Nhiệm vụ của bạn là tạo dữ liệu huấn luyện VQA (Visual Question Answering) chất lượng "
-    "cao bằng tiếng Việt. Câu hỏi phải cụ thể và tự nhiên; câu trả lời phải bám sát nội dung "
-    "quan sát được, có thông tin giá trị và không mơ hồ."
+    "Nhiệm vụ của bạn là tạo dữ liệu huấn luyện hội thoại thị giác chất lượng cao bằng tiếng Việt. "
+    "Câu hỏi phải cụ thể, tự nhiên và có tính nối tiếp; câu trả lời phải bám sát ảnh, đồng thời "
+    "chỉ sử dụng tiêu đề/chú thích khi cần bổ sung bối cảnh du lịch hoặc văn hóa."
 )
 
 _INSTRUCTION = """\
@@ -68,32 +68,41 @@ Viết một đoạn mô tả chi tiết kết hợp những gì nhìn thấy tr
 tiêu đề và chú thích: con người, đối tượng, hành động, màu sắc, bố cục không gian,
 tên địa danh/nhân vật/sự kiện nếu có trong ngữ cảnh.
 
-Phần 2 — Sinh đúng 2 cặp câu hỏi–trả lời (qa_pairs):
+Phần 2 — Sinh một hội thoại tự nhiên 3 lượt (conversation):
+Tạo đúng 3 lượt user-assistant, tức 6 message xen kẽ user/assistant. Hội thoại phải giống
+một người đang hỏi tiếp sau từng câu trả lời, không phải 3 câu QA độc lập đặt cạnh nhau.
 
-Cặp 1 — Nhận thức trực quan (type: "description"):
-  question — Câu hỏi về nhiều yếu tố trong ảnh: đối tượng, vị trí không gian, màu sắc,
-    hoạt động và mối quan hệ giữa các thành phần.
-  answer — Mô tả chi tiết và đầy đủ những gì nhìn thấy, bao gồm tất cả các yếu tố nổi
-    bật trong ảnh.
+Lượt 1 — Tổng quan thị giác:
+  user hỏi mô tả tổng quan ảnh.
+  assistant trả lời chi tiết các yếu tố nổi bật trong ảnh.
 
-Cặp 2 — Suy luận và bối cảnh (type: "cultural"):
-  question — Câu hỏi khai thác ý nghĩa sâu hơn (giá trị văn hóa, lịch sử, du lịch,
-    xã hội), được gắn với ít nhất một yếu tố cụ thể quan sát được trong ảnh.
-  answer — Bắt đầu từ một chi tiết cụ thể trong ảnh (đối tượng, địa điểm hoặc hoạt
-    động), sau đó kết nối với văn hóa và du lịch Việt Nam. Sử dụng tên địa danh, nhân
-    vật hoặc sự kiện từ tiêu đề/chú thích khi có.
+Lượt 2 — Chi tiết thị giác nối tiếp:
+  user hỏi tiếp về một chi tiết đã được assistant nhắc ở lượt 1.
+  assistant trả lời dựa trên quan sát trong ảnh.
+
+Lượt 3 — Bối cảnh du lịch/văn hóa:
+  user hỏi ý nghĩa du lịch, văn hóa, lịch sử hoặc xã hội của chi tiết/địa điểm/sự kiện đó.
+  assistant kết nối ảnh với tiêu đề/chú thích. Nếu thông tin đến từ ngữ cảnh, hãy nói rõ
+  bằng cách diễn đạt rõ ràng ngữ cảnh.
 
 Yêu cầu bắt buộc:
 - Câu hỏi tự nhiên và cụ thể, phù hợp với nội dung ảnh
+- Câu hỏi từ lượt 2 trở đi phải nối tiếp nội dung đã nói trước đó
 - Câu trả lời có thông tin giá trị, không chung chung
+- Không khẳng định tên người/địa điểm/sự kiện nếu chỉ ảnh không đủ chứng cứ; hãy gắn với
+  tiêu đề/chú thích khi dùng thông tin đó
 - Không đưa nội dung từ prompt này vào câu hỏi hoặc câu trả lời
 
 Trả về JSON hợp lệ theo đúng định dạng sau, không thêm nội dung nào khác:
 {
   "description": "...",
-  "qa_pairs": [
-    {"type": "description", "question": "...", "answer": "..."},
-    {"type": "cultural",    "question": "...", "answer": "..."}
+  "conversation": [
+    {"role": "user", "content": "..."},
+    {"role": "assistant", "content": "..."},
+    {"role": "user", "content": "..."},
+    {"role": "assistant", "content": "..."},
+    {"role": "user", "content": "..."},
+    {"role": "assistant", "content": "..."}
   ]
 }\
 """
@@ -117,28 +126,75 @@ def build_user_message(title: str, caption: str, image_path: Path) -> list[dict]
     ]
 
 
-def parse_qa_response(content: str) -> tuple[str, list[dict]]:
-    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip(), flags=re.MULTILINE).strip()
+def _strip_json_fence(content: str) -> str:
+    return re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip(), flags=re.MULTILINE).strip()
+
+
+def _normalize_conversation(raw_messages) -> list[dict[str, str]]:
+    if not isinstance(raw_messages, list):
+        raise ValueError(f"Expected 'conversation' to be a list, got {type(raw_messages).__name__}")
+    if len(raw_messages) % 2 != 0:
+        raw_messages = raw_messages[:-1]
+
+    normalized_messages: list[dict[str, str]] = []
+    expected_role = "user"
+    for index, item in enumerate(raw_messages):
+        if not isinstance(item, dict):
+            raise ValueError(f"Conversation message #{index} must be a dict.")
+
+        role = str(item.get("role", "")).strip().lower()
+        content = str(item.get("content", "")).strip()
+        if role != expected_role:
+            raise ValueError(f"Expected conversation role '{expected_role}' at message #{index}, got '{role}'.")
+        if not content:
+            raise ValueError(f"Conversation message #{index} has empty content.")
+
+        normalized_messages.append({"role": role, "content": content})
+        expected_role = "assistant" if expected_role == "user" else "user"
+
+    if len(normalized_messages) < 2:
+        raise ValueError("Conversation must contain at least one user-assistant pair.")
+    return normalized_messages
+
+
+def _qa_pairs_to_conversation(qa_list) -> list[dict[str, str]]:
+    if not isinstance(qa_list, list):
+        raise ValueError(f"Expected 'qa_pairs' to be a list, got {type(qa_list).__name__}")
+
+    messages: list[dict[str, str]] = []
+    for item in qa_list:
+        if not isinstance(item, dict):
+            continue
+        question = str(item.get("question", "")).strip()
+        answer = str(item.get("answer", "")).strip()
+        if question and answer:
+            messages.append({"role": "user", "content": question})
+            messages.append({"role": "assistant", "content": answer})
+    return _normalize_conversation(messages)
+
+
+def parse_qa_response(content: str) -> tuple[str, list[dict[str, str]]]:
+    cleaned = _strip_json_fence(content)
     try:
         parsed = json.loads(cleaned)
     except json.JSONDecodeError as exc:
         raise ValueError(f"Failed to parse QA response: {exc}\nContent: {content[:300]}") from exc
     if not isinstance(parsed, dict):
-        raise ValueError(f"Expected a dict with 'description' and 'qa_pairs', got {type(parsed).__name__}")
+        raise ValueError(
+            f"Expected a dict with 'description' and 'conversation', got {type(parsed).__name__}"
+        )
     description = str(parsed.get("description", "")).strip()
-    qa_list = parsed.get("qa_pairs")
-    if not isinstance(qa_list, list):
-        raise ValueError(f"Expected 'qa_pairs' to be a list, got {type(qa_list).__name__}")
-    qa_pairs = [
-        {
-            "type": str(item.get("type", "")),
-            "question": str(item.get("question", "")).strip(),
-            "answer": str(item.get("answer", "")).strip(),
-        }
-        for item in qa_list
-        if isinstance(item, dict)
-    ]
-    return description, qa_pairs
+    if not description:
+        raise ValueError("Expected a non-empty 'description'.")
+
+    if "conversation" in parsed:
+        return description, _normalize_conversation(parsed["conversation"])
+
+    # Backward compatibility for older batch outputs created before the conversation schema.
+    if "qa_pairs" in parsed:
+        return description, _qa_pairs_to_conversation(parsed["qa_pairs"])
+
+    raise ValueError("Expected either 'conversation' or legacy 'qa_pairs' in model response.")
 
 
 _REASONING_MODELS = {"o1", "o3", "o4"}
@@ -214,6 +270,7 @@ def main() -> None:
                 rec["image_id"] not in done_ids
                 and Path(rec["image_path"]).exists()
                 and rec.get("caption", "").strip()
+                and rec.get("title", "").strip()
             ):
                 records.append(rec)
 
@@ -321,7 +378,7 @@ def main() -> None:
                 content = choice["message"]["content"] or ""
                 if not content:
                     raise ValueError(f"empty content (finish_reason={choice.get('finish_reason')})")
-                description, qa_pairs = parse_qa_response(content)
+                description, conversation = parse_qa_response(content)
             except Exception as exc:
                 print(f"[warn] skipping {custom_id}: {exc}")
                 continue
@@ -335,7 +392,7 @@ def main() -> None:
                     "article_url": rec["article_url"],
                     "date": rec["date"],
                     "description": description,
-                    "qa_pairs": qa_pairs,
+                    "conversation": conversation,
                 },
             )
             saved += 1
