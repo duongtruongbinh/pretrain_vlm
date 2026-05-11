@@ -80,7 +80,7 @@ train_uit_only:
   model_dtype: bfloat16
   projector_dtype: float32
 
-instruction_data:
+instruction_data_gpt:
   dataset_name: 5CD-AI/Viet-ShareGPT-4o-Text-VQA
   output_dir: data/viet-sharegpt-4o-text-vqa
   system_prompt: Bạn là một trợ lý thị giác tiếng Việt, trả lời trung thực và chỉ dựa trên nội dung nhìn thấy trong ảnh.
@@ -94,6 +94,24 @@ instruction_data:
   image_field: null
   description_field: null
   qna_field: null
+  max_rows: null
+  inspect_only: false
+
+instruction_data_5cd:
+  dataset_name: 5CD-AI/Viet-Localization-VQA
+  output_dir: data/viet-localization-vqa
+  system_prompt: Bạn là một trợ lý thị giác tiếng Việt, trả lời trung thực và chỉ dựa trên nội dung nhìn thấy trong ảnh.
+  description_user_prompt: Hãy mô tả thật chi tiết hình ảnh này, bao gồm bối cảnh, đối tượng, hoạt động, màu sắc và các chi tiết văn hóa nếu có.
+  use_description_samples: true
+  use_qna_samples: true
+  split_mode: image_level
+  split_seed: 42
+  val_ratio: 0.01
+  test_ratio: 0.01
+  image_field: image
+  description_field: description
+  qna_field: conversations
+  streaming: true
   max_rows: null
   inspect_only: false
 
@@ -141,7 +159,7 @@ generate_qa_vietnamtourism:
   raw_dir: data/vietnamtourism-raw
   model: gpt-5-nano
   max_tokens: 16000
-  max_images: 1500
+  max_images: 100
 
 prepare_vietnamtourism:
   raw_dir: data/vietnamtourism-raw
