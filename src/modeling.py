@@ -106,7 +106,7 @@ def build_model(
 
     _cast_runtime_dtypes(model, dtype, resolved_projector_dtype)
     if projector_state is not None:
-        model.multi_modal_projector.load_state_dict(projector_state, strict=False)
+        model.multi_modal_projector.load_state_dict(projector_state, strict=True)
     _patch_projector_input_dtype(model.multi_modal_projector)
     _patch_last_hidden_state_image_features(model)
 

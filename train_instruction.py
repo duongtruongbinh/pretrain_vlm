@@ -17,6 +17,7 @@ from src.modeling import build_model, freeze_components, set_component_modes
 from src.runtime import (
     EpochShuffleSampler,
     append_jsonl,
+    build_weighted_sampler,
     current_lr,
     load_config,
     resolve_config_path,
@@ -182,10 +183,22 @@ def main() -> None:
     collator = InstructionCollator(
         cfg["vision_model"], tokenizer_source, max_text_tokens=int(cfg["max_text_tokens"])
     )
-    train_dataset = ImageInstructionDataset(resolve_config_path(cfg["train_jsonl"]))
-    eval_dataset = ImageInstructionDataset(resolve_config_path(cfg["eval_jsonl"]))
+    train_jsonl = cfg["train_jsonl"]
+    eval_jsonl = cfg["eval_jsonl"]
+    train_dataset = ImageInstructionDataset(
+        [resolve_config_path(p) for p in train_jsonl] if isinstance(train_jsonl, list) else resolve_config_path(train_jsonl)
+    )
+    eval_dataset = ImageInstructionDataset(
+        [resolve_config_path(p) for p in eval_jsonl] if isinstance(eval_jsonl, list) else resolve_config_path(eval_jsonl)
+    )
     eval_samples = _select_eval_samples(eval_dataset.records)
-    train_sampler = EpochShuffleSampler(train_dataset, seed=int(cfg["seed"]))
+    sample_weights = cfg.get("sample_weights")
+    if sample_weights is not None:
+        train_sampler = build_weighted_sampler(
+            train_dataset, seed=int(cfg["seed"]), source_weights=[float(w) for w in sample_weights]
+        )
+    else:
+        train_sampler = EpochShuffleSampler(train_dataset, seed=int(cfg["seed"]))
 
     train_loader = DataLoader(
         train_dataset,
@@ -303,7 +316,8 @@ def main() -> None:
         return ckpt_path
 
     def on_epoch_start(epoch: int) -> None:
-        train_sampler.set_epoch(epoch)
+        if hasattr(train_sampler, "set_epoch"):
+            train_sampler.set_epoch(epoch)
 
     def on_step_end(result, _training_state) -> None:
         if progress is not None:

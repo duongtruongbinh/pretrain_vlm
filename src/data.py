@@ -85,39 +85,43 @@ def _validate_messages(messages, *, sample_id: str) -> None:
 
 
 class ImageInstructionDataset(Dataset):
-    """Load image-chat examples for instruction tuning from a JSONL file."""
+    """Load image-chat examples for instruction tuning from one or more JSONL files."""
 
-    def __init__(self, jsonl_path: str | Path):
-        self.jsonl_path = Path(jsonl_path).expanduser().resolve()
+    def __init__(self, jsonl_path: str | Path | list[str | Path]):
+        paths = [jsonl_path] if isinstance(jsonl_path, (str, Path)) else jsonl_path
+        self.jsonl_paths = [Path(p).expanduser().resolve() for p in paths]
         self.records = []
+        self.source_indices: list[int] = []
         self.bad_indices = set()
 
-        with self.jsonl_path.open("r", encoding="utf-8") as handle:
-            for line_number, line in enumerate(handle, start=1):
-                line = line.strip()
-                if not line:
-                    continue
+        for source_idx, p in enumerate(self.jsonl_paths):
+            with p.open("r", encoding="utf-8") as handle:
+                for line_number, line in enumerate(handle, start=1):
+                    line = line.strip()
+                    if not line:
+                        continue
 
-                record = json.loads(line)
-                sample_id = str(record.get("id", f"line_{line_number}"))
-                image_path = str(record.get("image", "")).strip()
-                messages = record.get("messages")
+                    record = json.loads(line)
+                    sample_id = str(record.get("id", f"line_{line_number}"))
+                    image_path = str(record.get("image", "")).strip()
+                    messages = record.get("messages")
 
-                if not image_path:
-                    raise ValueError(f"Sample '{sample_id}' on line {line_number} is missing 'image'.")
-                _validate_messages(messages, sample_id=sample_id)
-                image_path = resolve_record_image_path(image_path, jsonl_path=self.jsonl_path)
+                    if not image_path:
+                        raise ValueError(f"Sample '{sample_id}' on line {line_number} is missing 'image'.")
+                    _validate_messages(messages, sample_id=sample_id)
+                    image_path = resolve_record_image_path(image_path, jsonl_path=p)
 
-                self.records.append(
-                    {
-                        "id": sample_id,
-                        "image": image_path,
-                        "messages": messages,
-                        "sample_type": str(record.get("sample_type", "unknown")),
-                        "image_id": str(record.get("image_id", "")),
-                        "source_dataset": str(record.get("source_dataset", "")),
-                    }
-                )
+                    self.records.append(
+                        {
+                            "id": sample_id,
+                            "image": image_path,
+                            "messages": messages,
+                            "sample_type": str(record.get("sample_type", "unknown")),
+                            "image_id": str(record.get("image_id", "")),
+                            "source_dataset": str(record.get("source_dataset", "")),
+                        }
+                    )
+                    self.source_indices.append(source_idx)
 
     def __len__(self) -> int:
         return len(self.records)

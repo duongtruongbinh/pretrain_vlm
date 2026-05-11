@@ -1,4 +1,4 @@
-"""Generate QA pairs from crawled images via OpenAI Batch API.
+"""Generate coherent multi-turn conversations from crawled images via OpenAI Batch API.
 
 Prompt design references:
   - LLaVA (Liu et al., 2023): description + complex-reasoning instruction types
@@ -8,6 +8,7 @@ Prompt design references:
 from __future__ import annotations
 
 import base64
+import io
 import json
 import os
 import re
@@ -16,44 +17,84 @@ import time
 from pathlib import Path
 
 from dotenv import load_dotenv
+from PIL import Image
 
 load_dotenv()
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.runtime import load_config
+from src.runtime import append_jsonl, load_config
 
 _MEDIA_TYPES: dict[str, str] = {
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
     ".png": "image/png",
     ".webp": "image/webp",
+    ".gif": "image/gif",
 }
 
+_OPENAI_SUPPORTED_FORMATS = {"JPEG", "PNG", "WEBP", "GIF"}
+
+
+def _to_supported_image(image_path: Path) -> tuple[bytes, str]:
+    """Return (bytes, media_type), converting to JPEG if the format is unsupported by OpenAI."""
+    raw = image_path.read_bytes()
+    img = Image.open(io.BytesIO(raw))
+    if img.format in _OPENAI_SUPPORTED_FORMATS:
+        return raw, _MEDIA_TYPES.get(image_path.suffix.lower(), "image/jpeg")
+    if img.mode == "RGBA":
+        bg = Image.new("RGB", img.size, (255, 255, 255))
+        bg.paste(img, mask=img.getchannel("A"))
+        img = bg
+    elif img.mode != "RGB":
+        img = img.convert("RGB")
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=85)
+    return buf.getvalue(), "image/jpeg"
+
+
 _SYSTEM_PROMPT = (
-    "Bạn là chuyên gia văn hóa, địa lý và du lịch Việt Nam với kiến thức sâu rộng "
-    "về cảnh quan, phong tục, lịch sử và ẩm thực Việt Nam. Nhiệm vụ của bạn là tạo "
-    "các cặp câu hỏi-trả lời chất lượng cao bằng tiếng Việt về hình ảnh du lịch, "
-    "chỉ dựa trên những gì quan sát được trong ảnh và thông tin ngữ cảnh được cung cấp."
+    "Bạn là trợ lý thị giác tiếng Việt đang nhìn thấy một bức ảnh. "
+    "Trả lời mọi câu hỏi bằng cách bạn đang thực sự quan sát ảnh đó."
 )
 
 _INSTRUCTION = """\
-Tạo đúng 2 cặp câu hỏi-trả lời về bức ảnh theo 2 loại sau.
-Trả về JSON hợp lệ (không thêm bất kỳ nội dung nào ngoài JSON):
+Nhìn vào bức ảnh và ngữ cảnh bên dưới, thiết kế một hội thoại 3 lượt tự nhiên giữa
+user và assistant về bức ảnh này.
 
-[
-  {"type": "description",
-   "question": "<hỏi mô tả tổng thể: cảnh vật, con người, màu sắc, bố cục không gian>",
-   "answer":   "<3–5 câu: vật thể chính, màu sắc, vị trí tương đối, hoạt động, ánh sáng/thời tiết>"},
-  {"type": "cultural",
-   "question": "<hỏi về ý nghĩa văn hóa, lễ hội, phong tục, ẩm thực hoặc kiến trúc đặc trưng Việt Nam>",
-   "answer":   "<2–3 câu kết nối nội dung ảnh với bối cảnh văn hóa-du lịch Việt Nam>"}
-]
+Mỗi câu hỏi của user PHẢI đáp ứng đồng thời ba điều kiện:
+(1) Là câu hỏi thực sự (kết thúc bằng "?"), không phải lệnh như "Hãy...", "Đề xuất...".
+(2) Bắt buộc phải nhìn thấy ảnh mới trả lời được, nếu chỉ đọc tiêu đề/chú thích mà
+    không thấy ảnh thì không thể trả lời chính xác.
+(3) Câu hỏi không được chứa tên địa danh, tên sự kiện, tên người lấy từ tiêu đề/chú thích
+    trừ khi thông tin đó nhìn thấy được trong ảnh (ví dụ: đọc được trên biển tên, băng rôn).
+    Tuyệt đối không hỏi dạng "Theo chú thích...", "Dựa vào tiêu đề...", hay dùng tên địa
+    danh/sự kiện mà người xem ảnh không thể biết nếu không đọc caption.
 
-Yêu cầu bắt buộc:
-- Câu hỏi đa dạng cách hỏi, tự nhiên (không lặp cùng công thức như "Trong ảnh có gì?")
-- Chỉ đề cập những gì thực sự thấy được trong ảnh hoặc có trong tiêu đề/chú thích
-- Câu trả lời cụ thể và thông tin, tránh chung chung và mơ hồ\
+Trước khi viết mỗi câu hỏi, tự kiểm tra: "Nếu tôi che ảnh đi và chỉ đọc tiêu đề/chú thích
+hoặc dựa vào kiến thức chung, tôi có thể trả lời câu này không?" — Nếu có, bỏ câu đó và
+đặt câu hỏi khác gắn với chi tiết nhìn thấy trong ảnh.
+
+Câu hỏi có thể về: số lượng đối tượng, màu sắc, vị trí không gian, hành động, trang phục,
+biểu cảm, hoặc ý nghĩa văn hóa/du lịch gắn với chi tiết nhìn thấy trong ảnh.
+Nếu ảnh có chi tiết văn hóa hoặc du lịch nhận ra được (trang phục truyền thống, địa danh,
+hoạt động đặc trưng...), hãy khai thác ý nghĩa của chi tiết đó trong một lượt.
+Câu hỏi từ lượt 2 trở đi phải nối tiếp nội dung đã nói ở lượt trước.
+Câu trả lời phức tạp nên có giải thích cụ thể. Nếu hỏi về thứ không có trong ảnh,
+assistant trả lời phủ định thay vì bịa đặt.
+
+Trả về JSON hợp lệ, không thêm nội dung nào khác:
+{
+  "description": "mô tả chi tiết bức ảnh kết hợp tiêu đề/chú thích",
+  "conversation": [
+    {"role": "user", "content": "...?"},
+    {"role": "assistant", "content": "..."},
+    {"role": "user", "content": "...?"},
+    {"role": "assistant", "content": "..."},
+    {"role": "user", "content": "...?"},
+    {"role": "assistant", "content": "..."}
+  ]
+}\
 """
 
 
@@ -66,8 +107,8 @@ def build_user_message(title: str, caption: str, image_path: Path) -> list[dict]
 
     text = "\n".join(context + ["", _INSTRUCTION]) if context else _INSTRUCTION
 
-    b64 = base64.standard_b64encode(image_path.read_bytes()).decode()
-    media_type = _MEDIA_TYPES.get(image_path.suffix.lower(), "image/jpeg")
+    img_bytes, media_type = _to_supported_image(image_path)
+    b64 = base64.standard_b64encode(img_bytes).decode()
 
     return [
         {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{b64}"}},
@@ -75,46 +116,149 @@ def build_user_message(title: str, caption: str, image_path: Path) -> list[dict]
     ]
 
 
-def parse_qa_response(content: str) -> list[dict]:
-    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip(), flags=re.MULTILINE).strip()
+def _strip_json_fence(content: str) -> str:
+    return re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip(), flags=re.MULTILINE).strip()
+
+
+def _repair_unescaped_quotes(text: str) -> str:
+    """Escape unescaped double-quotes inside JSON string values.
+
+    Models sometimes output Vietnamese text with unescaped " characters inside
+    string values, e.g. "description": "...có tiêu đề "Lễ hội đền Hà" và...".
+    Uses a state machine: a closing " is one whose next non-whitespace char is
+    , } ] " or : (structural JSON); otherwise the " is inside a value and must
+    be escaped.
+    """
+    in_string = False
+    result = []
+    i = 0
+    while i < len(text):
+        c = text[i]
+        if not in_string:
+            result.append(c)
+            if c == '"':
+                in_string = True
+        elif c == '\\':
+            result.append(c)
+            i += 1
+            if i < len(text):
+                result.append(text[i])
+        elif c == '"':
+            j = i + 1
+            while j < len(text) and text[j] in ' \t\r\n':
+                j += 1
+            if j >= len(text) or text[j] in ',}]":':
+                in_string = False
+                result.append(c)
+            else:
+                result.append('\\"')
+        else:
+            result.append(c)
+        i += 1
+    return ''.join(result)
+
+
+def _normalize_conversation(raw_messages) -> list[dict[str, str]]:
+    if not isinstance(raw_messages, list):
+        raise ValueError(f"Expected 'conversation' to be a list, got {type(raw_messages).__name__}")
+    if len(raw_messages) % 2 != 0:
+        raw_messages = raw_messages[:-1]
+
+    normalized_messages: list[dict[str, str]] = []
+    expected_role = "user"
+    for index, item in enumerate(raw_messages):
+        if not isinstance(item, dict):
+            raise ValueError(f"Conversation message #{index} must be a dict.")
+
+        role = str(item.get("role", "")).strip().lower()
+        content = str(item.get("content", "")).strip()
+        if role != expected_role:
+            raise ValueError(f"Expected conversation role '{expected_role}' at message #{index}, got '{role}'.")
+        if not content:
+            raise ValueError(f"Conversation message #{index} has empty content.")
+
+        normalized_messages.append({"role": role, "content": content})
+        expected_role = "assistant" if expected_role == "user" else "user"
+
+    if len(normalized_messages) < 2:
+        raise ValueError("Conversation must contain at least one user-assistant pair.")
+    return normalized_messages
+
+
+def _qa_pairs_to_conversation(qa_list) -> list[dict[str, str]]:
+    if not isinstance(qa_list, list):
+        raise ValueError(f"Expected 'qa_pairs' to be a list, got {type(qa_list).__name__}")
+
+    messages: list[dict[str, str]] = []
+    for item in qa_list:
+        if not isinstance(item, dict):
+            continue
+        question = str(item.get("question", "")).strip()
+        answer = str(item.get("answer", "")).strip()
+        if question and answer:
+            messages.append({"role": "user", "content": question})
+            messages.append({"role": "assistant", "content": answer})
+    return _normalize_conversation(messages)
+
+
+def parse_qa_response(content: str) -> tuple[str, list[dict[str, str]]]:
+    cleaned = _strip_json_fence(content)
     try:
         parsed = json.loads(cleaned)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Failed to parse QA response: {exc}\nContent: {content[:300]}") from exc
-    if not isinstance(parsed, list):
-        raise ValueError(f"Expected a list, got {type(parsed).__name__}")
-    return [
-        {
-            "type": str(item.get("type", "")),
-            "question": str(item.get("question", "")).strip(),
-            "answer": str(item.get("answer", "")).strip(),
-        }
-        for item in parsed
-        if isinstance(item, dict)
-    ]
+    except json.JSONDecodeError:
+        try:
+            parsed = json.loads(_repair_unescaped_quotes(cleaned))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Failed to parse QA response: {exc}\nContent: {content[:300]}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError(
+            f"Expected a dict with 'description' and 'conversation', got {type(parsed).__name__}"
+        )
+    description = str(parsed.get("description", "")).strip()
+    if not description:
+        raise ValueError("Expected a non-empty 'description'.")
+
+    if "conversation" in parsed:
+        return description, _normalize_conversation(parsed["conversation"])
+
+    # Backward compatibility for older batch outputs created before the conversation schema.
+    if "qa_pairs" in parsed:
+        return description, _qa_pairs_to_conversation(parsed["qa_pairs"])
+
+    raise ValueError("Expected either 'conversation' or legacy 'qa_pairs' in model response.")
+
+
+_REASONING_MODELS = {"o1", "o3", "o4"}
+
+
+def _is_reasoning_model(model: str) -> bool:
+    return any(model.startswith(prefix) for prefix in _REASONING_MODELS)
 
 
 def build_batch_request(record: dict, *, model: str, max_tokens: int) -> dict:
     image_path = Path(record["image_path"])
+    body: dict = {
+        "model": model,
+        "max_completion_tokens": max_tokens,
+        "messages": [
+            {"role": "developer", "content": _SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": build_user_message(
+                    title=record.get("title", ""),
+                    caption=record.get("caption", ""),
+                    image_path=image_path,
+                ),
+            },
+        ],
+    }
+    if _is_reasoning_model(model):
+        body["reasoning_effort"] = "medium"
     return {
         "custom_id": f"img-{record['image_id']}",
         "method": "POST",
         "url": "/v1/chat/completions",
-        "body": {
-            "model": model,
-            "max_completion_tokens": max_tokens,
-            "messages": [
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": build_user_message(
-                        title=record.get("title", ""),
-                        caption=record.get("caption", ""),
-                        image_path=image_path,
-                    ),
-                },
-            ],
-        },
+        "body": body,
     }
 
 
@@ -130,7 +274,6 @@ def main() -> None:
         max_images = int(max_images)
 
     raw_jsonl = raw_dir / "raw_crawl.jsonl"
-    batch_input = raw_dir / "batch_input.jsonl"
     batch_results = raw_dir / "batch_results.jsonl"
 
     if not raw_jsonl.exists():
@@ -148,13 +291,18 @@ def main() -> None:
     records: list[dict] = []
     with raw_jsonl.open(encoding="utf-8") as fh:
         for line in fh:
-            if max_images is not None and len(records) >= max_images:
-                break
             line = line.strip()
             if not line:
                 continue
+            if max_images is not None and len(records) >= max_images:
+                break
             rec = json.loads(line)
-            if rec["image_id"] not in done_ids and Path(rec["image_path"]).exists():
+            if (
+                rec["image_id"] not in done_ids
+                and Path(rec["image_path"]).exists()
+                and rec.get("caption", "").strip()
+                and rec.get("title", "").strip()
+            ):
                 records.append(rec)
 
     if not records:
@@ -169,48 +317,81 @@ def main() -> None:
         except Exception as exc:
             print(f"[warn] skipping {rec['image_id']}: {exc}")
 
-    batch_input.write_text(
-        "\n".join(json.dumps(req, ensure_ascii=False) for _, req in valid),
-        encoding="utf-8",
-    )
-    print(f"[qa-gen] {len(valid)} requests → {batch_input}")
-
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise EnvironmentError("OPENAI_API_KEY environment variable is not set")
     client = openai.OpenAI(api_key=api_key)
 
-    print("[qa-gen] uploading batch input ...")
-    with batch_input.open("rb") as fh:
-        uploaded = client.files.create(file=fh, purpose="batch")
-    print(f"[qa-gen] uploaded file: {uploaded.id}")
+    # Chunk by serialised byte size to stay under OpenAI's 200 MB batch file limit.
+    max_chunk_bytes = int(cfg.get("batch_chunk_mb", 150)) * 1024 * 1024
+    chunks: list[list[tuple[dict, dict]]] = [[]]
+    chunk_bytes = 0
+    for pair in valid:
+        line_bytes = len(json.dumps(pair[1], ensure_ascii=False).encode())
+        if chunk_bytes + line_bytes > max_chunk_bytes and chunks[-1]:
+            chunks.append([])
+            chunk_bytes = 0
+        chunks[-1].append(pair)
+        chunk_bytes += line_bytes
+    print(f"[qa-gen] splitting into {len(chunks)} batch(es) (≤{max_chunk_bytes // 1024 // 1024} MB each) ...")
 
-    batch = client.batches.create(
-        input_file_id=uploaded.id,
-        endpoint="/v1/chat/completions",
-        completion_window="24h",
-    )
-    print(f"[qa-gen] batch created: {batch.id}")
+    submitted_ids: list[str] = []
+    for i, chunk in enumerate(chunks):
+        chunk_path = raw_dir / f"batch_input_{i:03d}.jsonl"
+        chunk_path.write_text(
+            "\n".join(json.dumps(req, ensure_ascii=False) for _, req in chunk),
+            encoding="utf-8",
+        )
+        with chunk_path.open("rb") as fh:
+            uploaded = client.files.create(file=fh, purpose="batch")
+        batch = client.batches.create(
+            input_file_id=uploaded.id,
+            endpoint="/v1/chat/completions",
+            completion_window="24h",
+        )
+        print(f"[qa-gen] chunk {i + 1}/{len(chunks)} ({len(chunk)} reqs) → {batch.id}")
+        submitted_ids.append(batch.id)
 
     print("[qa-gen] polling (may take minutes to hours) ...")
-    while True:
-        batch = client.batches.retrieve(batch.id)
-        counts = batch.request_counts
-        completed = getattr(counts, "completed", "?")
-        total = getattr(counts, "total", "?")
-        print(f"  status={batch.status} completed={completed}/{total}", flush=True)
-        if batch.status in ("completed", "failed", "expired", "cancelled"):
-            break
-        time.sleep(60)
+    pending = list(submitted_ids)
+    completed_batches: dict[str, object] = {}
+    while pending:
+        still_pending = []
+        for bid in pending:
+            b = client.batches.retrieve(bid)
+            counts = b.request_counts
+            print(
+                f"  [{bid[-12:]}] status={b.status}"
+                f" completed={getattr(counts, 'completed', '?')}/{getattr(counts, 'total', '?')}",
+                flush=True,
+            )
+            if b.status in ("completed", "failed", "expired", "cancelled"):
+                completed_batches[bid] = b
+            else:
+                still_pending.append(bid)
+        pending = still_pending
+        if pending:
+            time.sleep(60)
 
-    if batch.status != "completed":
-        raise RuntimeError(f"Batch ended with status={batch.status}")
-
-    result_text = client.files.content(batch.output_file_id).text
     id_to_record = {f"img-{rec['image_id']}": rec for rec in records}
-
     saved = 0
-    with batch_results.open("a", encoding="utf-8") as out:
+    for bid in submitted_ids:
+        b = completed_batches[bid]
+        if b.status != "completed":
+            print(f"[warn] batch {bid} ended with status={b.status}, skipping")
+            if b.error_file_id:
+                err_text = client.files.content(b.error_file_id).text
+                for err_line in err_text.splitlines()[:5]:
+                    print(f"  error sample: {err_line.strip()}")
+            continue
+        if not b.output_file_id:
+            print(f"[warn] batch {bid} completed but output_file_id is None (all requests may have failed)")
+            if b.error_file_id:
+                err_text = client.files.content(b.error_file_id).text
+                for err_line in err_text.splitlines()[:5]:
+                    print(f"  error sample: {err_line.strip()}")
+            continue
+        result_text = client.files.content(b.output_file_id).text
         for line in result_text.splitlines():
             line = line.strip()
             if not line:
@@ -221,25 +402,29 @@ def main() -> None:
             if rec is None:
                 continue
             try:
-                content = result["response"]["body"]["choices"][0]["message"]["content"]
-                qa_pairs = parse_qa_response(content)
+                resp_body = result["response"]["body"]
+                if "error" in resp_body:
+                    raise ValueError(resp_body["error"].get("message", "api error"))
+                choice = resp_body["choices"][0]
+                content = choice["message"]["content"] or ""
+                if not content:
+                    raise ValueError(f"empty content (finish_reason={choice.get('finish_reason')})")
+                description, conversation = parse_qa_response(content)
             except Exception as exc:
-                print(f"[warn] parse failed for {custom_id}: {exc}")
+                print(f"[warn] skipping {custom_id}: {exc}")
                 continue
-            out.write(
-                json.dumps(
-                    {
-                        "image_id": rec["image_id"],
-                        "image_path": rec["image_path"],
-                        "title": rec["title"],
-                        "caption": rec["caption"],
-                        "article_url": rec["article_url"],
-                        "date": rec["date"],
-                        "qa_pairs": qa_pairs,
-                    },
-                    ensure_ascii=False,
-                )
-                + "\n"
+            append_jsonl(
+                batch_results,
+                {
+                    "image_id": rec["image_id"],
+                    "image_path": rec["image_path"],
+                    "title": rec["title"],
+                    "caption": rec["caption"],
+                    "article_url": rec["article_url"],
+                    "date": rec["date"],
+                    "description": description,
+                    "conversation": conversation,
+                },
             )
             saved += 1
 

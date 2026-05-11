@@ -32,7 +32,7 @@ A lightweight, two-stage LLaVA-style training pipeline for Vietnamese Vision-Lan
 | Vision encoder | `google/siglip2-so400m-patch16-384` · 576 tokens/image · 48 layers |
 | Language model | `meta-llama/Llama-3.2-1B-Instruct` |
 | Stage 1 data | COCO 2017 (Vietnamese captions) + UIT-OpenViIC |
-| Stage 2 data | Viet-ShareGPT-4o-Text-VQA |
+| Stage 2 data | Viet-ShareGPT-4o-Text-VQA; optional 5CD-AI/Viet-Localization-VQA |
 | Precision | BF16 (vision + LLM) · FP32 projector (Stage 1) · BF16 all (Stage 2) |
 | Target hardware | Single/multi GPU · 24 GB VRAM per device |
 
@@ -84,9 +84,10 @@ pretrain_vlm/
 ├── train_instruction.py        # Stage 2 entrypoint
 ├── config.yaml                 # All training + data configs
 ├── scripts/
-│   ├── prepare_data.py         # Download & process UIT-OpenViIC
+│   ├── prepare_uit_openviic.py         # Download & process UIT-OpenViIC
 │   ├── prepare_coco_data.py    # Process COCO 2017 (Vietnamese captions)
-│   ├── prepare_instruction_data.py  # Process Viet-ShareGPT-4o-Text-VQA
+│   ├── prepare_instruction_viet_sharegpt.py  # Process Viet-ShareGPT-4o-Text-VQA
+│   ├── prepare_instruction_5cd_localization.py  # Process 5CD Localization VQA
 │   └── train_stage1.sh         # Multi-GPU Stage 1 launcher
 └── src/
     ├── modeling.py             # Model & processor construction
@@ -146,13 +147,16 @@ Run scripts in order. All paths and dataset names are read from `config.yaml`.
 
 ```bash
 # 1. UIT-OpenViIC (Vietnamese image captioning — downloads from Google Drive)
-python scripts/prepare_data.py
+python scripts/prepare_uit_openviic.py
 
 # 2. COCO 2017 with Vietnamese captions (streams from HuggingFace Hub)
 python scripts/prepare_coco_data.py
 
-# 3. Viet-ShareGPT-4o-Text-VQA (instruction tuning — from HuggingFace Hub)
-python scripts/prepare_instruction_data.py
+# 3a. Viet-ShareGPT-4o-Text-VQA (instruction tuning — from HuggingFace Hub)
+python scripts/prepare_instruction_viet_sharegpt.py
+
+# 3b. 5CD-AI/Viet-Localization-VQA (optional instruction data; requires HF access approval)
+python scripts/prepare_instruction_5cd_localization.py
 ```
 
 Each script produces JSONL files under `data/`. Stage 1 expects `image` + `caption` fields; Stage 2 expects `image` + `messages` (OpenAI chat format, must end with an assistant turn).
@@ -206,9 +210,10 @@ All configuration lives in `config.yaml`. Relevant sections:
 | `train` | Stage 1 (COCO + UIT-OpenViIC) |
 | `train_uit_only` | Stage 1 (UIT-OpenViIC only) |
 | `instruction_train` | Stage 2 |
-| `prepare_data` | `scripts/prepare_data.py` |
+| `prepare_data` | `scripts/prepare_uit_openviic.py` |
 | `prepare_coco` | `scripts/prepare_coco_data.py` |
-| `instruction_data` | `scripts/prepare_instruction_data.py` |
+| `instruction_data_gpt` | `scripts/prepare_instruction_viet_sharegpt.py` |
+| `instruction_data_5cd` | `scripts/prepare_instruction_5cd_localization.py` |
 
 <details>
 <summary><strong>Key Stage 1 fields</strong></summary>

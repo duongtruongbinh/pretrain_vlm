@@ -118,16 +118,31 @@ class EpochShuffleSampler(Sampler[int]):
         return len(self.dataset)
 
 
-def build_weighted_sampler(dataset, seed: int) -> WeightedRandomSampler:
-    """Equal-contribution sampler: each source jsonl contributes 1/n of samples."""
+def build_weighted_sampler(
+    dataset, seed: int, source_weights: list[float] | None = None
+) -> WeightedRandomSampler:
+    """Weighted sampler across multiple source jsonl files.
 
+    source_weights: desired sampling proportion per source (will be normalised).
+    If None, each source contributes equally regardless of size.
+    """
     n_sources = len(dataset.jsonl_paths)
     counts = [0] * n_sources
     for src_idx in dataset.source_indices:
         counts[src_idx] += 1
 
-    source_weight = [1.0 / c if c > 0 else 0.0 for c in counts]
-    weights = [source_weight[src_idx] for src_idx in dataset.source_indices]
+    if source_weights is None:
+        target = [1.0] * n_sources
+    else:
+        if len(source_weights) != n_sources:
+            raise ValueError(
+                f"sample_weights has {len(source_weights)} entries but dataset has {n_sources} sources."
+            )
+        target = list(source_weights)
+
+    total = sum(target)
+    per_sample = [t / (total * c) if c > 0 else 0.0 for t, c in zip(target, counts)]
+    weights = [per_sample[src_idx] for src_idx in dataset.source_indices]
 
     generator = torch.Generator()
     generator.manual_seed(seed)

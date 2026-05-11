@@ -80,7 +80,7 @@ train_uit_only:
   model_dtype: bfloat16
   projector_dtype: float32
 
-instruction_data:
+instruction_data_gpt:
   dataset_name: 5CD-AI/Viet-ShareGPT-4o-Text-VQA
   output_dir: data/viet-sharegpt-4o-text-vqa
   system_prompt: Bạn là một trợ lý thị giác tiếng Việt, trả lời trung thực và chỉ dựa trên nội dung nhìn thấy trong ảnh.
@@ -97,11 +97,36 @@ instruction_data:
   max_rows: null
   inspect_only: false
 
+instruction_data_5cd:
+  dataset_name: 5CD-AI/Viet-Localization-VQA
+  output_dir: data/viet-localization-vqa
+  system_prompt: Bạn là một trợ lý thị giác tiếng Việt, trả lời trung thực và chỉ dựa trên nội dung nhìn thấy trong ảnh.
+  description_user_prompt: Hãy mô tả thật chi tiết hình ảnh này, bao gồm bối cảnh, đối tượng, hoạt động, màu sắc và các chi tiết văn hóa nếu có.
+  use_description_samples: true
+  use_qna_samples: true
+  split_mode: image_level
+  split_seed: 42
+  val_ratio: 0.01
+  test_ratio: 0.01
+  image_field: image
+  description_field: description
+  qna_field: conversations
+  streaming: true
+  max_rows: null
+  inspect_only: false
+
 instruction_train:
-  train_jsonl: viet-sharegpt-4o-text-vqa/train.jsonl
-  eval_jsonl: viet-sharegpt-4o-text-vqa/val.jsonl
-  output_dir: outputs/instruction_run1
-  stage1_projector_ckpt: outputs/run1/checkpoint-2500.pt
+  train_jsonl:
+    - data/viet-sharegpt-4o-text-vqa/train.jsonl
+    - data/viet-localization-vqa/train.jsonl
+    - data/vietnamtourism/train.jsonl
+  eval_jsonl:
+    - data/viet-sharegpt-4o-text-vqa/val.jsonl
+    - data/viet-localization-vqa/val.jsonl
+    - data/vietnamtourism/val.jsonl
+  sample_weights: [40, 55, 5]
+  output_dir: outputs/instruction_run2
+  stage1_projector_ckpt: outputs/stage_1_projector_coco_uit_test/checkpoint-19782/projector.pt
   vision_model: google/siglip2-so400m-patch16-384
   llm_model: meta-llama/Llama-3.2-1B-Instruct
   freeze_vision: true
@@ -109,10 +134,10 @@ instruction_train:
   train_llm: true
   mixed_precision: bf16
   model_dtype: bfloat16
-  projector_dtype: bfloat16
+  projector_dtype: float32
   optimizer_type: adafactor
   adam_foreach: false
-  max_text_tokens: 1024
+  max_text_tokens: 2048
   epochs: 1
   batch_size: 1
   grad_accum: 16
@@ -122,7 +147,7 @@ instruction_train:
   warmup_ratio: 0.03
   gradient_checkpointing: true
   log_steps: 10
-  eval_steps: 200
+  eval_steps: 1000
   save_steps: 500
   keep_last_n: 3
   save_best_by: eval_loss
@@ -140,13 +165,13 @@ crawl_vietnamtourism:
 generate_qa_vietnamtourism:
   raw_dir: data/vietnamtourism-raw
   model: gpt-5-nano
-  max_tokens: 800
-  max_images: 100
+  max_tokens: 16000
+  max_images: 2000
 
 prepare_vietnamtourism:
   raw_dir: data/vietnamtourism-raw
   output_dir: data/vietnamtourism
-  system_prompt: "Bạn là một trợ lý thị giác tiếng Việt, trả lời trung thực và chỉ dựa trên nội dung nhìn thấy trong ảnh."
+  system_prompt: "Bạn là một trợ lý thị giác tiếng Việt, trả lời trung thực dựa trên ảnh và ngữ cảnh bài viết được cung cấp."
   val_ratio: 0.01
   test_ratio: 0.01
   seed: 42
