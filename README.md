@@ -84,7 +84,7 @@ pretrain_vlm/
 ├── train_instruction.py        # Stage 2 entrypoint
 ├── config.yaml                 # All training + data configs
 ├── scripts/
-│   ├── prepare_data.py         # Download & process UIT-OpenViIC
+│   ├── prepare_uit_openviic.py         # Download & process UIT-OpenViIC
 │   ├── prepare_coco_data.py    # Process COCO 2017 (Vietnamese captions)
 │   ├── prepare_instruction_viet_sharegpt.py  # Process Viet-ShareGPT-4o-Text-VQA
 │   ├── prepare_instruction_5cd_localization.py  # Process 5CD Localization VQA
@@ -147,7 +147,7 @@ Run scripts in order. All paths and dataset names are read from `config.yaml`.
 
 ```bash
 # 1. UIT-OpenViIC (Vietnamese image captioning — downloads from Google Drive)
-python scripts/prepare_data.py
+python scripts/prepare_uit_openviic.py
 
 # 2. COCO 2017 with Vietnamese captions (streams from HuggingFace Hub)
 python scripts/prepare_coco_data.py
@@ -210,7 +210,7 @@ All configuration lives in `config.yaml`. Relevant sections:
 | `train` | Stage 1 (COCO + UIT-OpenViIC) |
 | `train_uit_only` | Stage 1 (UIT-OpenViIC only) |
 | `instruction_train` | Stage 2 |
-| `prepare_data` | `scripts/prepare_data.py` |
+| `prepare_data` | `scripts/prepare_uit_openviic.py` |
 | `prepare_coco` | `scripts/prepare_coco_data.py` |
 | `instruction_data_gpt` | `scripts/prepare_instruction_viet_sharegpt.py` |
 | `instruction_data_5cd` | `scripts/prepare_instruction_5cd_localization.py` |
