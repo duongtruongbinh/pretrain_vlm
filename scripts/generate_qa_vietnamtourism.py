@@ -64,7 +64,7 @@ user và assistant về bức ảnh này.
 
 Mỗi câu hỏi của user PHẢI đáp ứng đồng thời ba điều kiện:
 (1) Là câu hỏi thực sự (kết thúc bằng "?"), không phải lệnh như "Hãy...", "Đề xuất...".
-(2) Bắt buộc phải nhìn thấy ảnh mới trả lời được — nếu chỉ đọc tiêu đề/chú thích mà
+(2) Bắt buộc phải nhìn thấy ảnh mới trả lời được, nếu chỉ đọc tiêu đề/chú thích mà
     không thấy ảnh thì không thể trả lời chính xác.
 (3) Câu hỏi không được chứa tên địa danh, tên sự kiện, tên người lấy từ tiêu đề/chú thích
     trừ khi thông tin đó nhìn thấy được trong ảnh (ví dụ: đọc được trên biển tên, băng rôn).
@@ -120,6 +120,44 @@ def _strip_json_fence(content: str) -> str:
     return re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip(), flags=re.MULTILINE).strip()
 
 
+def _repair_unescaped_quotes(text: str) -> str:
+    """Escape unescaped double-quotes inside JSON string values.
+
+    Models sometimes output Vietnamese text with unescaped " characters inside
+    string values, e.g. "description": "...có tiêu đề "Lễ hội đền Hà" và...".
+    Uses a state machine: a closing " is one whose next non-whitespace char is
+    , } ] " or : (structural JSON); otherwise the " is inside a value and must
+    be escaped.
+    """
+    in_string = False
+    result = []
+    i = 0
+    while i < len(text):
+        c = text[i]
+        if not in_string:
+            result.append(c)
+            if c == '"':
+                in_string = True
+        elif c == '\\':
+            result.append(c)
+            i += 1
+            if i < len(text):
+                result.append(text[i])
+        elif c == '"':
+            j = i + 1
+            while j < len(text) and text[j] in ' \t\r\n':
+                j += 1
+            if j >= len(text) or text[j] in ',}]":':
+                in_string = False
+                result.append(c)
+            else:
+                result.append('\\"')
+        else:
+            result.append(c)
+        i += 1
+    return ''.join(result)
+
+
 def _normalize_conversation(raw_messages) -> list[dict[str, str]]:
     if not isinstance(raw_messages, list):
         raise ValueError(f"Expected 'conversation' to be a list, got {type(raw_messages).__name__}")
@@ -167,8 +205,11 @@ def parse_qa_response(content: str) -> tuple[str, list[dict[str, str]]]:
     cleaned = _strip_json_fence(content)
     try:
         parsed = json.loads(cleaned)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Failed to parse QA response: {exc}\nContent: {content[:300]}") from exc
+    except json.JSONDecodeError:
+        try:
+            parsed = json.loads(_repair_unescaped_quotes(cleaned))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Failed to parse QA response: {exc}\nContent: {content[:300]}") from exc
     if not isinstance(parsed, dict):
         raise ValueError(
             f"Expected a dict with 'description' and 'conversation', got {type(parsed).__name__}"

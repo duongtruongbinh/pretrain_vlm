@@ -77,7 +77,7 @@ def load_projector_checkpoint(
 
     raw = torch.load(checkpoint_path / "projector.pt", map_location="cpu", weights_only=True)
     raw_state = raw["projector_state_dict"] if "projector_state_dict" in raw else raw
-    model.multi_modal_projector.load_state_dict(_remap_projector_state(raw_state), strict=False)
+    model.multi_modal_projector.load_state_dict(_remap_projector_state(raw_state), strict=True)
     _maybe_load_optimizer_scheduler(checkpoint_path, optimizer, scheduler)
     if restore_rng:
         _restore_rng_state(checkpoint_path / "rng_state.pt")
@@ -147,7 +147,7 @@ def rotate_checkpoints(
 def _load_legacy_projector_ckpt(path: Path, model, optimizer=None, scheduler=None) -> dict[str, Any]:
     ckpt = torch.load(str(path), map_location="cpu", weights_only=True)
     state = _remap_projector_state(ckpt["projector_state_dict"])
-    model.multi_modal_projector.load_state_dict(state, strict=False)
+    model.multi_modal_projector.load_state_dict(state, strict=True)
     if optimizer is not None and "optimizer_state_dict" in ckpt:
         _safe_load_optimizer_state(optimizer, ckpt["optimizer_state_dict"])
     if scheduler is not None and "scheduler_state_dict" in ckpt:
