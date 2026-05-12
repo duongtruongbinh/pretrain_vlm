@@ -1,4 +1,5 @@
 """Convert raw crawl + generated conversations to project instruction-tuning JSONL."""
+
 from __future__ import annotations
 
 import hashlib
@@ -39,7 +40,9 @@ def normalize_conversation_messages(raw_messages) -> list[dict[str, str]]:
         role = str(message.get("role", "")).strip().lower()
         content = str(message.get("content", "")).strip()
         if role != expected_role:
-            raise ValueError(f"expected role '{expected_role}' at conversation message #{index}, got '{role}'.")
+            raise ValueError(
+                f"expected role '{expected_role}' at conversation message #{index}, got '{role}'."
+            )
         if not content:
             raise ValueError(f"conversation message #{index} has empty content.")
 
@@ -68,7 +71,6 @@ def conversation_from_record(record: dict) -> list[dict[str, str]]:
     if conversation:
         return conversation
     return qa_pairs_to_conversation(record.get("qa_pairs", []))
-
 
 
 def build_instruction_entry(
