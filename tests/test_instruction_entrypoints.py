@@ -52,6 +52,17 @@ class InstructionEntrypointTest(unittest.TestCase):
             self.assertEqual(llm_source, str((checkpoint / "llm").resolve()))
             self.assertEqual(tokenizer_source, str((checkpoint / "tokenizer").resolve()))
 
+    def test_stage1_streamlit_uses_checkpoint_tokenizer_when_available(self):
+        app = importlib.import_module("streamlit_stage1_test")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint = Path(tmpdir) / "checkpoint-10"
+            (checkpoint / "tokenizer").mkdir(parents=True)
+
+            tokenizer_source = app.resolve_tokenizer_source(checkpoint, "base-llm")
+
+            self.assertEqual(tokenizer_source, str((checkpoint / "tokenizer").resolve()))
+
     def test_instruction_dataset_reports_jsonl_paths_when_all_images_are_unreadable(self):
         data = importlib.import_module("src.data")
 
