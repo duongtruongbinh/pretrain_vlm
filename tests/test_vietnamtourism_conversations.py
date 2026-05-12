@@ -1,4 +1,5 @@
 import json
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -71,6 +72,78 @@ class VietnamTourismConversationTest(unittest.TestCase):
         self.assertEqual(entry["title"], "Quảng bá du lịch Việt Nam")
         self.assertEqual(entry["caption"], "Du khách tham gia sự kiện.")
         self.assertEqual(entry["sample_type"], "conversation")
+
+    def test_save_batch_result_text_appends_only_new_records(self):
+        generator = __import__("scripts.generate_qa_vietnamtourism", fromlist=["save_batch_result_text"])
+        response_payload = {
+            "description": "Một nhóm du khách đang đứng trước cổng.",
+            "conversation": [
+                {"role": "user", "content": "Trong ảnh có mấy người nổi bật?"},
+                {"role": "assistant", "content": "Có ba người nổi bật ở phía trước ảnh."},
+            ],
+        }
+        result_text = "\n".join(
+            [
+                json.dumps(
+                    {
+                        "custom_id": "img-existing",
+                        "response": {
+                            "body": {
+                                "choices": [
+                                    {"message": {"content": json.dumps(response_payload, ensure_ascii=False)}}
+                                ]
+                            }
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                json.dumps(
+                    {
+                        "custom_id": "img-new",
+                        "response": {
+                            "body": {
+                                "choices": [
+                                    {"message": {"content": json.dumps(response_payload, ensure_ascii=False)}}
+                                ]
+                            }
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+            ]
+        )
+        records = {
+            "img-existing": {
+                "image_id": "existing",
+                "image_path": "/tmp/existing.jpg",
+                "title": "Tựa đề cũ",
+                "caption": "Caption cũ",
+                "article_url": "https://example.com/old",
+                "date": "2026-05-12",
+            },
+            "img-new": {
+                "image_id": "new",
+                "image_path": "/tmp/new.jpg",
+                "title": "Tựa đề mới",
+                "caption": "Caption mới",
+                "article_url": "https://example.com/new",
+                "date": "2026-05-12",
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "batch_results.jsonl"
+            done_ids = {"existing"}
+
+            saved = generator.save_batch_result_text(result_text, records, output_path, done_ids)
+
+            self.assertEqual(saved, 1)
+            self.assertEqual(done_ids, {"existing", "new"})
+            lines = output_path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(lines), 1)
+            saved_record = json.loads(lines[0])
+            self.assertEqual(saved_record["image_id"], "new")
+            self.assertEqual(saved_record["description"], response_payload["description"])
 
 
 if __name__ == "__main__":
