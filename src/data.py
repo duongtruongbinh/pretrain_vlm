@@ -154,5 +154,5 @@ class ImageInstructionDataset(Dataset):
                 "source_dataset": record["source_dataset"],
             }
 
-        raise RuntimeError(f"All images in {self.jsonl_path} are invalid or unreadable.")
-
+        paths = ", ".join(str(path) for path in self.jsonl_paths)
+        raise RuntimeError(f"All images in {paths} are invalid or unreadable.")
