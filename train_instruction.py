@@ -125,14 +125,8 @@ def _log_eval_samples(model, collator, eval_samples, accelerator, max_new_tokens
     eos_ids = sorted({tokenizer.eos_token_id, tokenizer.convert_tokens_to_ids("<|end_of_text|>")})
     lines = []
     for idx, sample in enumerate(eval_samples, 1):
-        try:
-            with Image.open(sample["image"]) as img:
-                img = img.convert("RGB")
-        except Exception as e:
-            line = f"[sample {idx}] failed: {e}"
-            lines.append(line)
-            continue
-
+        with Image.open(sample["image"]) as img:
+            img = img.convert("RGB")
         prompt_ids, attn_mask, pixel_values = collator.build_prompt_tensors(
             sample["messages"][:-1], img, device=accelerator.device
         )

@@ -125,8 +125,8 @@ instruction_train:
     - data/viet-localization-vqa/val.jsonl
     - data/vietnamtourism/val.jsonl
   sample_weights: [40, 55, 5]
-  output_dir: outputs/instruction_run2
-  stage1_projector_ckpt: outputs/stage_1_projector_coco_uit_test/checkpoint-19782/projector.pt
+  output_dir: outputs/stage_2_instruction_final
+  stage1_projector_ckpt: outputs/stage_1_projector_coco_uit_test/checkpoint-19782
   vision_model: google/siglip2-so400m-patch16-384
   llm_model: meta-llama/Llama-3.2-1B-Instruct
   freeze_vision: true
@@ -145,7 +145,7 @@ instruction_train:
   llm_lr: 2.0e-5
   weight_decay: 0.01
   warmup_ratio: 0.03
-  gradient_checkpointing: true
+  gradient_checkpointing: false
   log_steps: 10
   eval_steps: 1000
   save_steps: 500
@@ -158,7 +158,7 @@ crawl_vietnamtourism:
   output_dir: data/vietnamtourism-raw
   category_id: 55
   max_pages: null
-  max_images: 5000
+  max_images: 10000
   delay_seconds: 1.0
   min_image_width: 200
 
@@ -166,6 +166,11 @@ generate_qa_vietnamtourism:
   raw_dir: data/vietnamtourism-raw
   model: gpt-5-nano
   max_tokens: 16000
+  batch_chunk_mb: 150
+  # Keep only a few OpenAI batches enqueued at once to avoid org token-limit failures.
+  max_active_batches: 3
+  # Number of new images to generate in this run. Existing batch_results.jsonl
+  # image_ids are skipped, so 2000 here means "generate about 2k more".
   max_images: 2000
 
 prepare_vietnamtourism:

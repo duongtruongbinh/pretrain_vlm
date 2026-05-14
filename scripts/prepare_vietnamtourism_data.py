@@ -1,4 +1,5 @@
 """Convert raw crawl + generated conversations to project instruction-tuning JSONL."""
+
 from __future__ import annotations
 
 import hashlib
@@ -39,7 +40,9 @@ def normalize_conversation_messages(raw_messages) -> list[dict[str, str]]:
         role = str(message.get("role", "")).strip().lower()
         content = str(message.get("content", "")).strip()
         if role != expected_role:
-            raise ValueError(f"expected role '{expected_role}' at conversation message #{index}, got '{role}'.")
+            raise ValueError(
+                f"expected role '{expected_role}' at conversation message #{index}, got '{role}'."
+            )
         if not content:
             raise ValueError(f"conversation message #{index} has empty content.")
 
@@ -70,7 +73,6 @@ def conversation_from_record(record: dict) -> list[dict[str, str]]:
     return qa_pairs_to_conversation(record.get("qa_pairs", []))
 
 
-
 def build_instruction_entry(
     *,
     image_path: Path,
@@ -80,6 +82,7 @@ def build_instruction_entry(
     source: str,
     title: str = "",
     caption: str = "",
+    description: str = "",
     article_url: str = "",
     date: str = "",
     post_id: str = "",
@@ -95,6 +98,7 @@ def build_instruction_entry(
         "image_id": image_id,
         "title": title,
         "caption": caption,
+        "description": description,
         "article_url": article_url,
         "date": date,
         "post_id": post_id,
@@ -158,6 +162,7 @@ def main() -> None:
                     source=source,
                     title=rec.get("title", ""),
                     caption=rec.get("caption", ""),
+                    description=rec.get("description", ""),
                     article_url=rec.get("article_url", ""),
                     date=rec.get("date", ""),
                     post_id=rec.get("post_id", ""),

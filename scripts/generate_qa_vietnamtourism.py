@@ -5,6 +5,7 @@ Prompt design references:
   - ShareGPT4V (Chen et al., 2023): rich spatial descriptions with color/layout
   - InstructBLIP (Dai et al., 2023): diverse short-answer factual templates
 """
+
 from __future__ import annotations
 
 import base64
@@ -16,14 +17,16 @@ import sys
 import time
 from pathlib import Path
 
+import openai
 from dotenv import load_dotenv
 from PIL import Image
 
-load_dotenv()
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(PROJECT_ROOT / ".env")
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.runtime import append_jsonl, load_config
+from src.runtime import append_jsonl, load_config  # noqa: E402
 
 _MEDIA_TYPES: dict[str, str] = {
     ".jpg": "image/jpeg",
@@ -34,6 +37,7 @@ _MEDIA_TYPES: dict[str, str] = {
 }
 
 _OPENAI_SUPPORTED_FORMATS = {"JPEG", "PNG", "WEBP", "GIF"}
+_FINAL_BATCH_STATUSES = {"completed", "failed", "expired", "cancelled"}
 
 
 def _to_supported_image(image_path: Path) -> tuple[bytes, str]:
@@ -138,14 +142,14 @@ def _repair_unescaped_quotes(text: str) -> str:
             result.append(c)
             if c == '"':
                 in_string = True
-        elif c == '\\':
+        elif c == "\\":
             result.append(c)
             i += 1
             if i < len(text):
                 result.append(text[i])
         elif c == '"':
             j = i + 1
-            while j < len(text) and text[j] in ' \t\r\n':
+            while j < len(text) and text[j] in " \t\r\n":
                 j += 1
             if j >= len(text) or text[j] in ',}]":':
                 in_string = False
@@ -155,7 +159,7 @@ def _repair_unescaped_quotes(text: str) -> str:
         else:
             result.append(c)
         i += 1
-    return ''.join(result)
+    return "".join(result)
 
 
 def _normalize_conversation(raw_messages) -> list[dict[str, str]]:
@@ -173,7 +177,9 @@ def _normalize_conversation(raw_messages) -> list[dict[str, str]]:
         role = str(item.get("role", "")).strip().lower()
         content = str(item.get("content", "")).strip()
         if role != expected_role:
-            raise ValueError(f"Expected conversation role '{expected_role}' at message #{index}, got '{role}'.")
+            raise ValueError(
+                f"Expected conversation role '{expected_role}' at message #{index}, got '{role}'."
+            )
         if not content:
             raise ValueError(f"Conversation message #{index} has empty content.")
 
@@ -228,6 +234,90 @@ def parse_qa_response(content: str) -> tuple[str, list[dict[str, str]]]:
     raise ValueError("Expected either 'conversation' or legacy 'qa_pairs' in model response.")
 
 
+def read_done_image_ids(batch_results: Path) -> set[str]:
+    done_ids: set[str] = set()
+    if not batch_results.exists():
+        return done_ids
+    with batch_results.open(encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if line:
+                done_ids.add(str(json.loads(line)["image_id"]))
+    return done_ids
+
+
+def save_batch_result_text(
+    result_text: str, id_to_record: dict[str, dict], batch_results: Path, done_ids: set[str]
+) -> int:
+    saved = 0
+    for line in result_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        result = json.loads(line)
+        custom_id = result.get("custom_id") or result.get("id", "")
+        rec = id_to_record.get(custom_id)
+        if rec is None:
+            continue
+        image_id = str(rec["image_id"])
+        if image_id in done_ids:
+            continue
+        try:
+            resp_body = result["response"]["body"]
+            if "error" in resp_body:
+                raise ValueError(resp_body["error"].get("message", "api error"))
+            choice = resp_body["choices"][0]
+            content = choice["message"]["content"] or ""
+            if not content:
+                raise ValueError(f"empty content (finish_reason={choice.get('finish_reason')})")
+            description, conversation = parse_qa_response(content)
+        except Exception as exc:
+            print(f"[warn] skipping {custom_id}: {exc}")
+            continue
+        append_jsonl(
+            batch_results,
+            {
+                "image_id": rec["image_id"],
+                "image_path": rec["image_path"],
+                "title": rec["title"],
+                "caption": rec["caption"],
+                "article_url": rec["article_url"],
+                "date": rec["date"],
+                "description": description,
+                "conversation": conversation,
+            },
+        )
+        done_ids.add(image_id)
+        saved += 1
+    return saved
+
+
+def print_batch_errors(client, batch) -> None:
+    errors = getattr(getattr(batch, "errors", None), "data", None) or []
+    for err in errors[:5]:
+        print(f"  error sample: {getattr(err, 'message', err)}")
+    error_file_id = getattr(batch, "error_file_id", None)
+    if error_file_id:
+        err_text = client.files.content(error_file_id).text
+        for err_line in err_text.splitlines()[:5]:
+            print(f"  error sample: {err_line.strip()}")
+
+
+def save_completed_batch(
+    client, batch, id_to_record: dict[str, dict], batch_results: Path, done_ids: set[str]
+) -> int:
+    if getattr(batch, "status", None) != "completed":
+        print(f"[warn] batch {batch.id} ended with status={batch.status}, skipping")
+        print_batch_errors(client, batch)
+        return 0
+    if not getattr(batch, "output_file_id", None):
+        print(f"[warn] batch {batch.id} completed but output_file_id is None (all requests may have failed)")
+        print_batch_errors(client, batch)
+        return 0
+    result_text = client.files.content(batch.output_file_id).text
+    return save_batch_result_text(result_text, id_to_record, batch_results, done_ids)
+
+
 _REASONING_MODELS = {"o1", "o3", "o4"}
 
 
@@ -245,9 +335,7 @@ def build_batch_request(record: dict, *, model: str, max_tokens: int) -> dict:
             {
                 "role": "user",
                 "content": build_user_message(
-                    title=record.get("title", ""),
-                    caption=record.get("caption", ""),
-                    image_path=image_path,
+                    title=record.get("title", ""), caption=record.get("caption", ""), image_path=image_path
                 ),
             },
         ],
@@ -262,13 +350,28 @@ def build_batch_request(record: dict, *, model: str, max_tokens: int) -> dict:
     }
 
 
-def main() -> None:
-    import openai
+def submit_batch_chunk(
+    client, raw_dir: Path, chunk_index: int, total_chunks: int, chunk: list[tuple[dict, dict]]
+):
+    chunk_path = raw_dir / f"batch_input_{chunk_index:03d}.jsonl"
+    chunk_path.write_text(
+        "\n".join(json.dumps(req, ensure_ascii=False) for _, req in chunk), encoding="utf-8"
+    )
+    with chunk_path.open("rb") as fh:
+        uploaded = client.files.create(file=fh, purpose="batch")
+    batch = client.batches.create(
+        input_file_id=uploaded.id, endpoint="/v1/chat/completions", completion_window="24h"
+    )
+    print(f"[qa-gen] chunk {chunk_index + 1}/{total_chunks} ({len(chunk)} reqs) → {batch.id}")
+    return batch
 
+
+def main() -> None:
     cfg = load_config("generate_qa_vietnamtourism")
     raw_dir = Path(cfg["raw_dir"]).expanduser().resolve()
     model = str(cfg.get("model", "gpt-4o"))
     max_tokens = int(cfg.get("max_tokens", 1500))
+    max_active_batches = max(1, int(cfg.get("max_active_batches", 3)))
     max_images = cfg.get("max_images")
     if max_images is not None:
         max_images = int(max_images)
@@ -279,13 +382,7 @@ def main() -> None:
     if not raw_jsonl.exists():
         raise FileNotFoundError(f"Run crawl script first: {raw_jsonl}")
 
-    done_ids: set[str] = set()
-    if batch_results.exists():
-        with batch_results.open(encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if line:
-                    done_ids.add(json.loads(line)["image_id"])
+    done_ids = read_done_image_ids(batch_results)
     print(f"[qa-gen] {len(done_ids)} already generated, skipping")
 
     records: list[dict] = []
@@ -298,7 +395,7 @@ def main() -> None:
                 break
             rec = json.loads(line)
             if (
-                rec["image_id"] not in done_ids
+                str(rec["image_id"]) not in done_ids
                 and Path(rec["image_path"]).exists()
                 and rec.get("caption", "").strip()
                 and rec.get("title", "").strip()
@@ -333,100 +430,53 @@ def main() -> None:
             chunk_bytes = 0
         chunks[-1].append(pair)
         chunk_bytes += line_bytes
-    print(f"[qa-gen] splitting into {len(chunks)} batch(es) (≤{max_chunk_bytes // 1024 // 1024} MB each) ...")
-
-    submitted_ids: list[str] = []
-    for i, chunk in enumerate(chunks):
-        chunk_path = raw_dir / f"batch_input_{i:03d}.jsonl"
-        chunk_path.write_text(
-            "\n".join(json.dumps(req, ensure_ascii=False) for _, req in chunk),
-            encoding="utf-8",
-        )
-        with chunk_path.open("rb") as fh:
-            uploaded = client.files.create(file=fh, purpose="batch")
-        batch = client.batches.create(
-            input_file_id=uploaded.id,
-            endpoint="/v1/chat/completions",
-            completion_window="24h",
-        )
-        print(f"[qa-gen] chunk {i + 1}/{len(chunks)} ({len(chunk)} reqs) → {batch.id}")
-        submitted_ids.append(batch.id)
-
-    print("[qa-gen] polling (may take minutes to hours) ...")
-    pending = list(submitted_ids)
-    completed_batches: dict[str, object] = {}
-    while pending:
-        still_pending = []
-        for bid in pending:
-            b = client.batches.retrieve(bid)
-            counts = b.request_counts
-            print(
-                f"  [{bid[-12:]}] status={b.status}"
-                f" completed={getattr(counts, 'completed', '?')}/{getattr(counts, 'total', '?')}",
-                flush=True,
-            )
-            if b.status in ("completed", "failed", "expired", "cancelled"):
-                completed_batches[bid] = b
-            else:
-                still_pending.append(bid)
-        pending = still_pending
-        if pending:
-            time.sleep(60)
+    print(
+        f"[qa-gen] splitting into {len(chunks)} batch(es)"
+        f" (≤{max_chunk_bytes // 1024 // 1024} MB each, max_active={max_active_batches}) ..."
+    )
 
     id_to_record = {f"img-{rec['image_id']}": rec for rec in records}
     saved = 0
-    for bid in submitted_ids:
-        b = completed_batches[bid]
-        if b.status != "completed":
-            print(f"[warn] batch {bid} ended with status={b.status}, skipping")
-            if b.error_file_id:
-                err_text = client.files.content(b.error_file_id).text
-                for err_line in err_text.splitlines()[:5]:
-                    print(f"  error sample: {err_line.strip()}")
-            continue
-        if not b.output_file_id:
-            print(f"[warn] batch {bid} completed but output_file_id is None (all requests may have failed)")
-            if b.error_file_id:
-                err_text = client.files.content(b.error_file_id).text
-                for err_line in err_text.splitlines()[:5]:
-                    print(f"  error sample: {err_line.strip()}")
-            continue
-        result_text = client.files.content(b.output_file_id).text
-        for line in result_text.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            result = json.loads(line)
-            custom_id = result.get("custom_id") or result.get("id", "")
-            rec = id_to_record.get(custom_id)
-            if rec is None:
-                continue
-            try:
-                resp_body = result["response"]["body"]
-                if "error" in resp_body:
-                    raise ValueError(resp_body["error"].get("message", "api error"))
-                choice = resp_body["choices"][0]
-                content = choice["message"]["content"] or ""
-                if not content:
-                    raise ValueError(f"empty content (finish_reason={choice.get('finish_reason')})")
-                description, conversation = parse_qa_response(content)
-            except Exception as exc:
-                print(f"[warn] skipping {custom_id}: {exc}")
-                continue
-            append_jsonl(
-                batch_results,
-                {
-                    "image_id": rec["image_id"],
-                    "image_path": rec["image_path"],
-                    "title": rec["title"],
-                    "caption": rec["caption"],
-                    "article_url": rec["article_url"],
-                    "date": rec["date"],
-                    "description": description,
-                    "conversation": conversation,
-                },
-            )
-            saved += 1
+    active_batches: dict[str, object] = {}
+    next_chunk_index = 0
+    print("[qa-gen] polling (may take minutes to hours) ...")
+    try:
+        while next_chunk_index < len(chunks) or active_batches:
+            while next_chunk_index < len(chunks) and len(active_batches) < max_active_batches:
+                batch = submit_batch_chunk(
+                    client, raw_dir, next_chunk_index, len(chunks), chunks[next_chunk_index]
+                )
+                active_batches[batch.id] = batch
+                next_chunk_index += 1
+
+            still_active: dict[str, object] = {}
+            for bid in active_batches:
+                b = client.batches.retrieve(bid)
+                counts = b.request_counts
+                print(
+                    f"  [{bid[-12:]}] status={b.status}"
+                    f" completed={getattr(counts, 'completed', '?')}/{getattr(counts, 'total', '?')}",
+                    flush=True,
+                )
+                if b.status == "completed":
+                    batch_saved = save_completed_batch(client, b, id_to_record, batch_results, done_ids)
+                    saved += batch_saved
+                    print(f"  [{bid[-12:]}] saved={batch_saved}", flush=True)
+                elif b.status in _FINAL_BATCH_STATUSES:
+                    save_completed_batch(client, b, id_to_record, batch_results, done_ids)
+                else:
+                    still_active[bid] = b
+            active_batches = still_active
+
+            if next_chunk_index < len(chunks) or active_batches:
+                time.sleep(60)
+    except KeyboardInterrupt:
+        if active_batches:
+            print("\n[qa-gen] interrupted; these submitted batches may still finish on OpenAI:")
+            for bid in active_batches:
+                print(f"  {bid}")
+            print("[qa-gen] completed batches already seen by this process were saved before exit.")
+        raise
 
     print(f"[qa-gen] done — {saved} records saved to {batch_results}")
 
