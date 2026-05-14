@@ -11,7 +11,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from prepare_instruction_common import DEFAULT_CONFIG_SECTION, main, parse_args, run  # noqa: E402
+from prepare_instruction_common import DEFAULT_CONFIG_SECTION, main, parse_args  # noqa: E402
+
+__all__ = ["DEFAULT_CONFIG_SECTION", "main", "parse_args"]
 
 
 if __name__ == "__main__":

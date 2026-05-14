@@ -17,16 +17,12 @@ import sys
 import time
 from pathlib import Path
 
+import openai
+from dotenv import load_dotenv
 from PIL import Image
 
-try:
-    from dotenv import load_dotenv
-except ModuleNotFoundError:
-    load_dotenv = None
-
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if load_dotenv is not None:
-    load_dotenv(PROJECT_ROOT / ".env")
+load_dotenv(PROJECT_ROOT / ".env")
 
 sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -371,8 +367,6 @@ def submit_batch_chunk(
 
 
 def main() -> None:
-    import openai
-
     cfg = load_config("generate_qa_vietnamtourism")
     raw_dir = Path(cfg["raw_dir"]).expanduser().resolve()
     model = str(cfg.get("model", "gpt-4o"))

@@ -7,6 +7,7 @@ import re
 import sys
 import traceback
 from collections import Counter
+from io import BytesIO
 from pathlib import Path
 
 from datasets import load_dataset
@@ -54,8 +55,6 @@ def save_image(image_value, destination: Path) -> None:
     if isinstance(image_value, Image.Image):
         image = image_value
     elif isinstance(image_value, dict) and image_value.get("bytes") is not None:
-        from io import BytesIO
-
         image = Image.open(BytesIO(image_value["bytes"]))
         should_close = True
     elif isinstance(image_value, dict) and image_value.get("path"):
