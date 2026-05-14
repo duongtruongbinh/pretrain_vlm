@@ -144,7 +144,7 @@ def load_model_resource(
     import torch
 
     from src.modeling import build_model, build_processor
-    from src.training.checkpoint import load_projector_checkpoint
+    from src.training import load_projector_checkpoint
 
     device = torch.device(device_name)
     tokenizer_source = resolve_tokenizer_source(checkpoint_path, llm_model)

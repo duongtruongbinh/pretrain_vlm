@@ -10,8 +10,6 @@ from collections.abc import Iterable
 
 
 def normalize_text(text: str) -> str:
-    """Normalize answer text for exact-match style VQA metrics."""
-
     text = unicodedata.normalize("NFC", str(text)).casefold()
     chars = []
     for char in text:
@@ -81,11 +79,10 @@ def summarize_vqa_scores(rows: Iterable[dict]) -> dict[str, float]:
 def caption_metrics(predictions: list[str], references: list[list[str]]) -> dict[str, float]:
     """Compute corpus-level caption metrics without external packages.
 
-    CIDEr here follows the standard TF-IDF n-gram cosine idea and is intended for
+    CIDEr follows the standard TF-IDF n-gram cosine idea and is intended for
     local model selection. For leaderboard-grade reporting, run the official
     COCO-caption evaluator as a secondary check.
     """
-
     if len(predictions) != len(references):
         raise ValueError("predictions and references must have the same length.")
     cleaned_refs = [as_references(refs) for refs in references]
@@ -203,7 +200,7 @@ def _cider(predictions: list[str], references: list[list[str]]) -> float:
     doc_freq: dict[int, Counter[tuple[str, ...]]] = {n: Counter() for n in range(1, 5)}
     for refs in references:
         for n in range(1, 5):
-            unique_grams = set()
+            unique_grams: set[tuple[str, ...]] = set()
             for ref in refs:
                 unique_grams.update(_ngrams(tokenize(ref), n))
             doc_freq[n].update(unique_grams)

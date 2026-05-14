@@ -24,15 +24,17 @@ from src.runtime import (
     set_seed,
     setup_logger,
 )
-from src.training.checkpoint import (
+from src.training import (
+    TrainingState,
+    compute_steps_per_epoch,
     load_full_checkpoint,
     load_projector_checkpoint,
     rotate_checkpoints,
+    run_evaluation,
+    run_training,
     save_training_checkpoint,
     update_checkpoint_pointer,
 )
-from src.training.engine import TrainingState, compute_steps_per_epoch, run_training
-from src.training.eval import run_evaluation
 
 
 def _parse_args() -> argparse.Namespace:

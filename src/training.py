@@ -5,6 +5,9 @@ import platform
 import random
 import shutil
 import sys
+from collections.abc import Callable, Iterable
+from contextlib import nullcontext
+from dataclasses import dataclass
 from importlib import metadata
 from pathlib import Path
 from typing import Any
@@ -14,9 +17,171 @@ import yaml
 from loguru import logger
 
 
+# ---------------------------------------------------------------------------
+# Training-loop types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TrainingState:
+    global_step: int = 0
+    epoch: int = 0
+    best_eval_loss: float | None = None
+
+
+@dataclass(frozen=True)
+class StepResult:
+    global_step: int
+    epoch: int
+    train_loss: float
+    supervised_tokens: int
+
+
+ModeCallback = Callable[[], None]
+EpochCallback = Callable[[int], None]
+ParamsCallback = Callable[[], Iterable[torch.nn.Parameter]]
+StepCallback = Callable[[StepResult, TrainingState], None]
+SampleLogger = Callable[[object, object], list[str]]
+
+
+# ---------------------------------------------------------------------------
+# Training loop
+# ---------------------------------------------------------------------------
+
+def compute_steps_per_epoch(loader_len: int, grad_accum: int) -> int:
+    if grad_accum <= 0:
+        raise ValueError("grad_accum must be a positive integer.")
+    return (loader_len + grad_accum - 1) // grad_accum
+
+
+def run_training(
+    *,
+    model,
+    train_loader,
+    optimizer,
+    scheduler,
+    accelerator,
+    epochs: int,
+    grad_accum: int,
+    state: TrainingState,
+    set_train_mode: ModeCallback,
+    trainable_parameters: ParamsCallback,
+    on_step_end: StepCallback | None = None,
+    on_epoch_start: EpochCallback | None = None,
+    max_grad_norm: float = 1.0,
+) -> TrainingState:
+    steps_per_epoch = compute_steps_per_epoch(len(train_loader), grad_accum)
+    starting_epoch = state.global_step // steps_per_epoch if steps_per_epoch else 0
+    batches_to_skip = (state.global_step % steps_per_epoch) * grad_accum if steps_per_epoch else 0
+
+    for epoch in range(starting_epoch, int(epochs)):
+        state.epoch = epoch
+        if on_epoch_start is not None:
+            on_epoch_start(epoch)
+        set_train_mode()
+
+        iterator = iter(train_loader)
+        for _ in range(batches_to_skip):
+            next(iterator, None)
+        batches_to_skip = 0
+
+        while True:
+            window = _next_window(iterator, grad_accum)
+            if not window:
+                break
+            step_result = _train_window(
+                model=model,
+                window=window,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                accelerator=accelerator,
+                trainable_parameters=trainable_parameters,
+                max_grad_norm=max_grad_norm,
+            )
+            if step_result is None:
+                continue
+            state.global_step += 1
+            result = StepResult(
+                global_step=state.global_step,
+                epoch=epoch,
+                train_loss=step_result["train_loss"],
+                supervised_tokens=step_result["supervised_tokens"],
+            )
+            if on_step_end is not None:
+                on_step_end(result, state)
+            set_train_mode()
+
+    return state
+
+
+def _next_window(iterator, grad_accum: int) -> list[dict[str, Any]]:
+    window = []
+    for _ in range(grad_accum):
+        try:
+            window.append(next(iterator))
+        except StopIteration:
+            break
+    return window
+
+
+def _train_window(
+    *,
+    model,
+    window: list[dict[str, Any]],
+    optimizer,
+    scheduler,
+    accelerator,
+    trainable_parameters: ParamsCallback,
+    max_grad_norm: float,
+) -> dict[str, float | int] | None:
+    local_tokens = torch.stack([_supervised_tokens(batch) for batch in window]).sum()
+    global_tokens = accelerator.gather(local_tokens).sum().item()
+    if global_tokens <= 0:
+        return None
+
+    optimizer.zero_grad(set_to_none=True)
+    local_loss_sum = torch.zeros((), device=accelerator.device, dtype=torch.float32)
+    local_token_sum = torch.zeros((), device=accelerator.device, dtype=torch.float32)
+
+    for batch_idx, batch in enumerate(window):
+        sync_context = (
+            accelerator.no_sync(model)
+            if batch_idx < len(window) - 1 and accelerator.num_processes > 1
+            else nullcontext()
+        )
+        with sync_context:
+            with accelerator.autocast():
+                outputs = model(**batch)
+            batch_tokens = _supervised_tokens(batch)
+            if batch_tokens.item() <= 0:
+                continue
+            batch_loss_sum = outputs.loss.float() * batch_tokens.float()
+            scaled_loss = batch_loss_sum * accelerator.num_processes / global_tokens
+            accelerator.backward(scaled_loss)
+            local_loss_sum = local_loss_sum + batch_loss_sum.detach()
+            local_token_sum = local_token_sum + batch_tokens.float()
+
+    accelerator.clip_grad_norm_(list(trainable_parameters()), max_grad_norm)
+    optimizer.step()
+    scheduler.step()
+
+    stats = torch.stack([local_loss_sum, local_token_sum]).unsqueeze(0)
+    gathered = accelerator.gather_for_metrics(stats)
+    token_count = gathered[:, 1].sum().item()
+    train_loss = gathered[:, 0].sum().item() / token_count
+    return {"train_loss": float(train_loss), "supervised_tokens": int(token_count)}
+
+
+def _supervised_tokens(batch: dict[str, Any]) -> torch.Tensor:
+    labels = batch["labels"]
+    return (labels != -100).sum()
+
+
+# ---------------------------------------------------------------------------
+# Checkpointing
+# ---------------------------------------------------------------------------
+
 def _remap_projector_state(state_dict: dict) -> dict:
     """Map legacy sequential projector keys to HF LLaVA projector keys."""
-
     mapping = {
         "0.weight": "linear_1.weight",
         "0.bias": "linear_1.bias",
@@ -39,13 +204,12 @@ def save_training_checkpoint(
     stage: str,
     save_language_model: bool,
 ) -> None:
-    """Save a reproducible directory checkpoint for a training stage."""
-
     checkpoint_dir = Path(path)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     torch.save(
-        {"projector_state_dict": model.multi_modal_projector.state_dict()}, checkpoint_dir / "projector.pt"
+        {"projector_state_dict": model.multi_modal_projector.state_dict()},
+        checkpoint_dir / "projector.pt",
     )
     torch.save(optimizer.state_dict(), checkpoint_dir / "optimizer.pt")
     torch.save(scheduler.state_dict(), checkpoint_dir / "scheduler.pt")
@@ -69,8 +233,6 @@ def save_training_checkpoint(
 def load_projector_checkpoint(
     path: str | Path, model, optimizer=None, scheduler=None, restore_rng: bool = False
 ) -> dict[str, Any]:
-    """Load projector checkpoints from new directories or legacy `.pt` files."""
-
     checkpoint_path = Path(path)
     if checkpoint_path.is_file():
         return _load_legacy_projector_ckpt(checkpoint_path, model, optimizer, scheduler)
@@ -87,8 +249,6 @@ def load_projector_checkpoint(
 def load_full_checkpoint(
     path: str | Path, model, optimizer=None, scheduler=None, restore_rng: bool = False
 ) -> dict[str, Any]:
-    """Load trainable full-stage state from a directory checkpoint."""
-
     checkpoint_dir = Path(path)
     state = load_projector_checkpoint(checkpoint_dir, model, optimizer, scheduler, restore_rng=restore_rng)
     lm_head_path = checkpoint_dir / "lm_head.pt"
@@ -106,8 +266,6 @@ def update_checkpoint_pointer(
     metric_name: str | None = None,
     metric_value: float | None = None,
 ) -> None:
-    """Write a small JSON pointer for best or last checkpoint."""
-
     payload = {"checkpoint": str(Path(checkpoint_path).resolve()), "step": int(step)}
     if metric_name is not None:
         payload["metric_name"] = metric_name
@@ -118,8 +276,6 @@ def update_checkpoint_pointer(
 def rotate_checkpoints(
     output_dir: str | Path, keep_last_n: int, protected_paths: set[str | Path] | None = None
 ) -> None:
-    """Delete old checkpoints while preserving protected best and last paths."""
-
     output_path = Path(output_dir)
     protected = {Path(p).resolve() for p in protected_paths or set()}
     for pointer in ("best_checkpoint.json", "last_checkpoint.json"):
@@ -172,20 +328,20 @@ def _load_trainer_state(checkpoint_dir: Path) -> dict[str, Any]:
 def _maybe_load_optimizer_scheduler(checkpoint_dir: Path, optimizer=None, scheduler=None) -> None:
     if optimizer is not None and (checkpoint_dir / "optimizer.pt").exists():
         _safe_load_optimizer_state(
-            optimizer, torch.load(checkpoint_dir / "optimizer.pt", map_location="cpu", weights_only=True)
+            optimizer,
+            torch.load(checkpoint_dir / "optimizer.pt", map_location="cpu", weights_only=True),
         )
     if scheduler is not None and (checkpoint_dir / "scheduler.pt").exists():
-        scheduler.load_state_dict(torch.load(checkpoint_dir / "scheduler.pt", map_location="cpu", weights_only=True))
+        scheduler.load_state_dict(
+            torch.load(checkpoint_dir / "scheduler.pt", map_location="cpu", weights_only=True)
+        )
 
 
 def _safe_load_optimizer_state(optimizer, state_dict) -> None:
     try:
         optimizer.load_state_dict(state_dict)
     except ValueError as error:
-        logger.warning(
-            "skipped optimizer state because the "
-            f"projector parameter set changed: {error}"
-        )
+        logger.warning("skipped optimizer state because the projector parameter set changed: {}", error)
 
 
 def _checkpoint_step(path: Path) -> int | None:
@@ -203,7 +359,7 @@ def _rng_state(seed: int) -> dict[str, Any]:
 def _restore_rng_state(path: Path) -> None:
     if not path.exists():
         return
-    state = torch.load(path, map_location="cpu", weights_only=False)  # contains Python random state
+    state = torch.load(path, map_location="cpu", weights_only=False)
     if "python" in state:
         random.setstate(state["python"])
     if "torch" in state:
@@ -231,3 +387,46 @@ def _package_versions() -> dict[str, Any]:
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     with path.open("w", encoding="utf-8") as fh:
         json.dump(payload, fh, ensure_ascii=False, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# Evaluation
+# ---------------------------------------------------------------------------
+
+def evaluate_loss(model, eval_loader, accelerator) -> float:
+    total_loss, total_tokens = 0.0, 0.0
+    for batch in eval_loader:
+        with torch.no_grad(), accelerator.autocast():
+            outputs = model(**batch)
+        sup_tokens = (batch["labels"] != -100).sum()
+        stats = torch.stack(
+            [outputs.loss.detach().float() * sup_tokens.float(), sup_tokens.float()]
+        )
+        gathered = accelerator.gather_for_metrics(stats.unsqueeze(0))
+        total_loss += gathered[:, 0].sum().item()
+        total_tokens += gathered[:, 1].sum().item()
+    return total_loss / total_tokens if total_tokens > 0 else float("nan")
+
+
+def run_evaluation(
+    *,
+    model,
+    eval_loader,
+    accelerator,
+    global_step: int,
+    logger,
+    sample_logger: SampleLogger | None = None,
+    restore_train_mode: ModeCallback | None = None,
+) -> float:
+    accelerator.unwrap_model(model).eval()
+    eval_loss = evaluate_loss(model, eval_loader, accelerator)
+    logger.info("step {}: eval_loss={:.6f}", global_step, eval_loss)
+
+    if sample_logger is not None and accelerator.is_main_process:
+        lines = sample_logger(model, accelerator)
+        for line in lines:
+            logger.info(line)
+
+    if restore_train_mode is not None:
+        restore_train_mode()
+    return eval_loss

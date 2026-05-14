@@ -96,28 +96,26 @@ pretrain_vlm/
 │   ├── instruction.py          # Streamlit demo: Stage 2 instruction chat
 │   └── _utils.py               # Shared demo utilities
 ├── scripts/
+│   ├── prepare_data.py         # Data prep entrypoint (subcommands per dataset)
+│   ├── evaluate.py             # Benchmark eval entrypoint (subcommands per task)
+│   ├── download_benchmarks.py  # Download KTVIC + Viet Cultural VQA datasets
 │   ├── prepare_uit_openviic.py
 │   ├── prepare_coco_data.py
-│   ├── prepare_instruction_viet_sharegpt.py
-│   ├── prepare_instruction_5cd_localization.py
 │   ├── prepare_instruction_common.py
 │   ├── prepare_vietnamtourism_data.py
 │   ├── generate_qa_vietnamtourism.py
 │   ├── crawl_vietnamtourism.py
-│   ├── evaluate_ktvic.py
-│   ├── evaluate_viet_cultural_vqa.py
-│   ├── download_benchmarks.py
-│   └── train_stage1.sh
+│   ├── train_stage1.sh
+│   └── train_instruction.sh
 └── src/
     ├── modeling.py             # Model & processor construction
     ├── collators.py            # CaptionCollator / InstructionCollator
     ├── data.py                 # ImageCaptionDataset / ImageInstructionDataset
     ├── prompts.py              # Jinja2 render helper
     ├── runtime.py              # Seed, logging, samplers, config loading
-    └── training/
-        ├── engine.py           # Token-weighted training loop
-        ├── checkpoint.py       # Save/load/rotate checkpoints
-        └── eval.py             # Evaluation loop
+    ├── training.py             # Token-weighted training loop, checkpointing, eval
+    ├── inference.py            # Model loading, generation, IO helpers
+    └── metrics.py              # Corpus-level caption and VQA metrics
 ```
 
 ---
@@ -160,17 +158,17 @@ Run scripts in order. All paths are read from `config.yaml`.
 
 ```bash
 # Stage 1 data
-python scripts/prepare_uit_openviic.py
-python scripts/prepare_coco_data.py
+python scripts/prepare_data.py uit
+python scripts/prepare_data.py coco
 
 # Stage 2 data
-python scripts/prepare_instruction_viet_sharegpt.py
-python scripts/prepare_instruction_5cd_localization.py  # optional; requires HF access approval
+python scripts/prepare_data.py sharegpt
+python scripts/prepare_data.py 5cd       # optional; requires HF access approval
 
 # VietnamTourism data (optional)
-python scripts/crawl_vietnamtourism.py
-python scripts/generate_qa_vietnamtourism.py  # uses OpenAI Batch API
-python scripts/prepare_vietnamtourism_data.py
+python scripts/prepare_data.py vietnamtourism-crawl
+python scripts/prepare_data.py vietnamtourism-qa      # uses OpenAI Batch API
+python scripts/prepare_data.py vietnamtourism-prepare
 ```
 
 Stage 1 expects `image` + `caption` fields. Stage 2 expects `image` + `messages` (OpenAI chat format, must end with an assistant turn).
@@ -185,8 +183,11 @@ Stage 1 expects `image` + `caption` fields. Stage 2 expects `image` + `messages`
 # Single GPU
 accelerate launch --num_processes 1 train.py --config-section train
 
-# Multi-GPU
+# Multi-GPU (edit CUDA_VISIBLE_DEVICES and NUM_PROCESSES in the script as needed)
 bash scripts/train_stage1.sh
+
+# Single GPU via shell script
+NUM_PROCESSES=1 CUDA_VISIBLE_DEVICES=0 bash scripts/train_stage1.sh
 
 # Resume
 accelerate launch train.py --config-section train --resume-from outputs/run1/checkpoint-500
@@ -207,16 +208,19 @@ accelerate launch train_instruction.py --resume-from outputs/instruction_run1/ch
 ## Evaluation
 
 ```bash
+# Download benchmarks first
+python scripts/download_benchmarks.py --output-root data/benchmarks
+
 # Stage 1 — KTVIC captioning benchmark
-python scripts/evaluate_ktvic.py \
-  --annotations data/ktvic/annotations.json \
-  --image-root data/ktvic/images \
+python scripts/evaluate.py ktvic \
+  --annotations data/benchmarks/ktvic/test.json \
+  --image-root data/benchmarks/ktvic/images \
   --checkpoint outputs/stage1/checkpoint-2500
 
 # Stage 2 — Viet Cultural VQA
-python scripts/evaluate_viet_cultural_vqa.py \
-  --annotations data/viet_cultural_vqa/test.json \
-  --image-root data/viet_cultural_vqa/images \
+python scripts/evaluate.py viet-cultural-vqa \
+  --annotations data/benchmarks/viet-cultural-vqa/splits/test_data.json \
+  --image-root data/benchmarks/viet-cultural-vqa \
   --checkpoint outputs/instruction_run1/checkpoint-1000
 ```
 

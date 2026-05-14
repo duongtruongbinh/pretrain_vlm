@@ -136,8 +136,7 @@ def prepare_split(config: dict, hf_split: str, local_split: str, output_dir: Pat
     )
 
 
-def main() -> None:
-    args = parse_args()
+def run(args: argparse.Namespace) -> None:
     config = load_config(args.config_section)
     if args.output_dir:
         config["output_dir"] = args.output_dir
@@ -152,6 +151,10 @@ def main() -> None:
     output_dir = Path(config["output_dir"]).expanduser().resolve()
     for hf_split, local_split in split_mapping(config).items():
         prepare_split(config, hf_split, local_split, output_dir)
+
+
+def main() -> None:
+    run(parse_args())
 
 
 if __name__ == "__main__":

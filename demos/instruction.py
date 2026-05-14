@@ -152,7 +152,7 @@ def load_model_resource(
     import torch
     from src.collators import InstructionCollator
     from src.modeling import build_model
-    from src.training.checkpoint import load_full_checkpoint
+    from src.training import load_full_checkpoint
 
     device = torch.device(device_name)
     llm_source, tokenizer_source = resolve_checkpoint_sources(checkpoint_path, llm_model)
