@@ -19,11 +19,11 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from src.evaluation.io import read_json_or_jsonl, write_json, write_jsonl  # noqa: E402
 from src.evaluation.metrics import caption_metrics  # noqa: E402
 from src.modeling import build_model, build_processor  # noqa: E402
+from src.prompts import render  # noqa: E402
 from src.runtime import load_config  # noqa: E402
 from src.training.checkpoint import load_projector_checkpoint  # noqa: E402
 
-
-PROMPT_TEMPLATE = "<image>\nMô tả hình ảnh này: "
+PROMPT_TEMPLATE = render("caption_prompt.j2")
 
 
 def parse_args() -> argparse.Namespace:

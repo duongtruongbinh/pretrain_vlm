@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from datasets import Image as HfImage
 from datasets import load_dataset
+from loguru import logger
 from PIL import Image
 
 from src.runtime import load_config
@@ -32,15 +33,11 @@ SPLIT_NAME_MAP = {
 }
 
 
-def log(message: str) -> None:
-    print(message)
-
-
 def log_check(name: str, condition: bool, detail: str) -> None:
-    prefix = "[check]" if condition else "[error]"
-    log(f"{prefix} {name}: {detail}")
     if not condition:
+        logger.error("[error] {}: {}", name, detail)
         raise RuntimeError(detail)
+    logger.info("[check] {}: {}", name, detail)
 
 
 def sanitize_image_key(text: str) -> str:
@@ -287,7 +284,7 @@ def run(config_section: str) -> None:
     images_root = output_dir / "images"
     streaming = bool(config.get("streaming", False))
 
-    log(f"[instruction-data] loading dataset '{dataset_name}' from config section '{config_section}'...")
+    logger.info("[instruction-data] loading dataset '{}' from config section '{}'...", dataset_name, config_section)
     dataset_dict = load_dataset_from_config(config)
     raw_splits = list(dataset_dict.keys())
     log_check("dataset_load", bool(raw_splits), f"Loaded raw splits: {raw_splits}")
@@ -310,9 +307,9 @@ def run(config_section: str) -> None:
         first_features, override=config.get("qna_field"), candidates=QNA_FIELD_CANDIDATES, field_label="qna"
     )
 
-    log("[instruction-data] schema summary:")
+    logger.info("[instruction-data] schema summary:")
     for raw_split in raw_splits:
-        log(f"  - {raw_split}: columns={list(dataset_dict[raw_split].features.keys())}")
+        logger.info("  - {}: columns={}", raw_split, list(dataset_dict[raw_split].features.keys()))
 
     preview_row = get_first_row(dataset_dict, first_split, streaming=streaming)
     preview_summary = {
@@ -320,7 +317,7 @@ def run(config_section: str) -> None:
         description_field: summarize_value(preview_row.get(description_field)),
         qna_field: summarize_value(preview_row.get(qna_field)),
     }
-    log(f"[instruction-data] first-row preview: {json.dumps(preview_summary, ensure_ascii=False)}")
+    logger.info("[instruction-data] first-row preview: {}", json.dumps(preview_summary, ensure_ascii=False))
 
     dataset_dict = maybe_cast_images(dataset_dict, image_field, streaming=streaming)
 
@@ -339,7 +336,7 @@ def run(config_section: str) -> None:
     )
 
     if bool(config.get("inspect_only", False)):
-        log("[instruction-data] inspect_only=true, stopping after schema checks.")
+        logger.info("[instruction-data] inspect_only=true, stopping after schema checks.")
         return
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -363,14 +360,14 @@ def run(config_section: str) -> None:
         processed_rows = 0
         for raw_split in raw_splits:
             raw_dataset = dataset_dict[raw_split]
-            log(
-                f"[instruction-data] processing raw split '{raw_split}' "
-                f"with {dataset_len_text(raw_dataset)} rows..."
+            logger.info(
+                "[instruction-data] processing raw split '{}' with {} rows...",
+                raw_split, dataset_len_text(raw_dataset),
             )
 
             for row_index, row in enumerate(raw_dataset):
                 if max_rows is not None and processed_rows >= max_rows:
-                    log(f"[instruction-data] reached max_rows={max_rows}, stopping early.")
+                    logger.info("[instruction-data] reached max_rows={}, stopping early.", max_rows)
                     break
 
                 processed_rows += 1
@@ -465,7 +462,7 @@ def run(config_section: str) -> None:
                     else:
                         counters["rows_other_errors"] += 1
                     counters["rows_skipped"] += 1
-                    log(f"[instruction-data][warn] skipped row split={raw_split} index={row_index}: {error}")
+                    logger.warning("[instruction-data] skipped row split={} index={}: {}", raw_split, row_index, error)
 
             if max_rows is not None and processed_rows >= max_rows:
                 break
@@ -529,8 +526,8 @@ def run(config_section: str) -> None:
     with report_path.open("w", encoding="utf-8") as handle:
         json.dump(report, handle, ensure_ascii=False, indent=2)
 
-    log("[instruction-data] done")
-    log(f"[instruction-data] report written to {report_path}")
+    logger.info("[instruction-data] done")
+    logger.info("[instruction-data] report written to {}", report_path)
 
 
 def main(argv: list[str] | None = None, *, default_config_section: str = DEFAULT_CONFIG_SECTION) -> None:

@@ -1,0 +1,36 @@
+Nhìn vào bức ảnh và ngữ cảnh bên dưới, thiết kế một hội thoại 3 lượt tự nhiên giữa
+user và assistant về bức ảnh này.
+
+Mỗi câu hỏi của user PHẢI đáp ứng đồng thời ba điều kiện:
+(1) Là câu hỏi thực sự (kết thúc bằng "?"), không phải lệnh như "Hãy...", "Đề xuất...".
+(2) Bắt buộc phải nhìn thấy ảnh mới trả lời được, nếu chỉ đọc tiêu đề/chú thích mà
+    không thấy ảnh thì không thể trả lời chính xác.
+(3) Câu hỏi không được chứa tên địa danh, tên sự kiện, tên người lấy từ tiêu đề/chú thích
+    trừ khi thông tin đó nhìn thấy được trong ảnh (ví dụ: đọc được trên biển tên, băng rôn).
+    Tuyệt đối không hỏi dạng "Theo chú thích...", "Dựa vào tiêu đề...", hay dùng tên địa
+    danh/sự kiện mà người xem ảnh không thể biết nếu không đọc caption.
+
+Trước khi viết mỗi câu hỏi, tự kiểm tra: "Nếu tôi che ảnh đi và chỉ đọc tiêu đề/chú thích
+hoặc dựa vào kiến thức chung, tôi có thể trả lời câu này không?" — Nếu có, bỏ câu đó và
+đặt câu hỏi khác gắn với chi tiết nhìn thấy trong ảnh.
+
+Câu hỏi có thể về: số lượng đối tượng, màu sắc, vị trí không gian, hành động, trang phục,
+biểu cảm, hoặc ý nghĩa văn hóa/du lịch gắn với chi tiết nhìn thấy trong ảnh.
+Nếu ảnh có chi tiết văn hóa hoặc du lịch nhận ra được (trang phục truyền thống, địa danh,
+hoạt động đặc trưng...), hãy khai thác ý nghĩa của chi tiết đó trong một lượt.
+Câu hỏi từ lượt 2 trở đi phải nối tiếp nội dung đã nói ở lượt trước.
+Câu trả lời phức tạp nên có giải thích cụ thể. Nếu hỏi về thứ không có trong ảnh,
+assistant trả lời phủ định thay vì bịa đặt.
+
+Trả về JSON hợp lệ, không thêm nội dung nào khác:
+{
+  "description": "mô tả chi tiết bức ảnh kết hợp tiêu đề/chú thích",
+  "conversation": [
+    {"role": "user", "content": "...?"},
+    {"role": "assistant", "content": "..."},
+    {"role": "user", "content": "...?"},
+    {"role": "assistant", "content": "..."},
+    {"role": "user", "content": "...?"},
+    {"role": "assistant", "content": "..."}
+  ]
+}

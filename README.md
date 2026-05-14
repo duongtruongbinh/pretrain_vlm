@@ -1,4 +1,4 @@
-# 🦙🔭 Vietnamese VLM Pretraining
+# Vietnamese VLM Pretraining
 
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.10%2B-ee4c2c?logo=pytorch&logoColor=white)](https://pytorch.org/)
@@ -6,7 +6,7 @@
 [![Accelerate](https://img.shields.io/badge/🤗_Accelerate-1.12%2B-orange)](https://huggingface.co/docs/accelerate)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
-A lightweight, two-stage LLaVA-style training pipeline for Vietnamese Vision-Language Models.
+A two-stage LLaVA-style pretraining pipeline for Vietnamese Vision-Language Models.
 
 **Architecture:** [SigLIP2-so400m-patch16-384](https://huggingface.co/google/siglip2-so400m-patch16-384) → MLP projector → [Llama-3.2-1B-Instruct](https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct), assembled via HuggingFace [`LlavaForConditionalGeneration`](https://huggingface.co/docs/transformers/model_doc/llava).
 
@@ -20,6 +20,8 @@ A lightweight, two-stage LLaVA-style training pipeline for Vietnamese Vision-Lan
 - [Setup](#setup)
 - [Data Preparation](#data-preparation)
 - [Training](#training)
+- [Evaluation](#evaluation)
+- [Streamlit Demos](#streamlit-demos)
 - [Configuration](#configuration)
 - [Checkpoints](#checkpoints)
 
@@ -83,16 +85,34 @@ pretrain_vlm/
 ├── train.py                    # Stage 1 entrypoint
 ├── train_instruction.py        # Stage 2 entrypoint
 ├── config.yaml                 # All training + data configs
+├── prompts/                    # Jinja2 prompt templates
+│   ├── caption_prompt.j2
+│   ├── vqa_system.j2
+│   ├── vqa_question.j2
+│   ├── qa_gen_system.j2
+│   └── qa_gen_instruction.j2
+├── demos/
+│   ├── stage1.py               # Streamlit demo: Stage 1 captioning
+│   ├── instruction.py          # Streamlit demo: Stage 2 instruction chat
+│   └── _utils.py               # Shared demo utilities
 ├── scripts/
-│   ├── prepare_uit_openviic.py         # Download & process UIT-OpenViIC
-│   ├── prepare_coco_data.py    # Process COCO 2017 (Vietnamese captions)
-│   ├── prepare_instruction_viet_sharegpt.py  # Process Viet-ShareGPT-4o-Text-VQA
-│   ├── prepare_instruction_5cd_localization.py  # Process 5CD Localization VQA
-│   └── train_stage1.sh         # Multi-GPU Stage 1 launcher
+│   ├── prepare_uit_openviic.py
+│   ├── prepare_coco_data.py
+│   ├── prepare_instruction_viet_sharegpt.py
+│   ├── prepare_instruction_5cd_localization.py
+│   ├── prepare_instruction_common.py
+│   ├── prepare_vietnamtourism_data.py
+│   ├── generate_qa_vietnamtourism.py
+│   ├── crawl_vietnamtourism.py
+│   ├── evaluate_ktvic.py
+│   ├── evaluate_viet_cultural_vqa.py
+│   ├── download_benchmarks.py
+│   └── train_stage1.sh
 └── src/
     ├── modeling.py             # Model & processor construction
     ├── collators.py            # CaptionCollator / InstructionCollator
     ├── data.py                 # ImageCaptionDataset / ImageInstructionDataset
+    ├── prompts.py              # Jinja2 render helper
     ├── runtime.py              # Seed, logging, samplers, config loading
     └── training/
         ├── engine.py           # Token-weighted training loop
@@ -108,22 +128,15 @@ pretrain_vlm/
 <summary><strong>Option A — uv (recommended)</strong></summary>
 
 ```bash
-# Install uv if needed
 curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Create env and install dependencies
 uv sync
-
-# Activate (optional — uv run works without activation)
 source .venv/bin/activate
 ```
-
-Run any command with `uv run python ...` or activate the venv first.
 
 </details>
 
 <details>
-<summary><strong>Option B — pip + requirements.txt</strong></summary>
+<summary><strong>Option B — pip</strong></summary>
 
 ```bash
 python -m venv .venv
@@ -133,7 +146,7 @@ pip install -r requirements.txt
 
 </details>
 
-**HuggingFace access** — both models require accepting their license on HuggingFace Hub and authenticating:
+**HuggingFace access** — both models require accepting their license and authenticating:
 
 ```bash
 huggingface-cli login
@@ -143,23 +156,24 @@ huggingface-cli login
 
 ## Data Preparation
 
-Run scripts in order. All paths and dataset names are read from `config.yaml`.
+Run scripts in order. All paths are read from `config.yaml`.
 
 ```bash
-# 1. UIT-OpenViIC (Vietnamese image captioning — downloads from Google Drive)
+# Stage 1 data
 python scripts/prepare_uit_openviic.py
-
-# 2. COCO 2017 with Vietnamese captions (streams from HuggingFace Hub)
 python scripts/prepare_coco_data.py
 
-# 3a. Viet-ShareGPT-4o-Text-VQA (instruction tuning — from HuggingFace Hub)
+# Stage 2 data
 python scripts/prepare_instruction_viet_sharegpt.py
+python scripts/prepare_instruction_5cd_localization.py  # optional; requires HF access approval
 
-# 3b. 5CD-AI/Viet-Localization-VQA (optional instruction data; requires HF access approval)
-python scripts/prepare_instruction_5cd_localization.py
+# VietnamTourism data (optional)
+python scripts/crawl_vietnamtourism.py
+python scripts/generate_qa_vietnamtourism.py  # uses OpenAI Batch API
+python scripts/prepare_vietnamtourism_data.py
 ```
 
-Each script produces JSONL files under `data/`. Stage 1 expects `image` + `caption` fields; Stage 2 expects `image` + `messages` (OpenAI chat format, must end with an assistant turn).
+Stage 1 expects `image` + `caption` fields. Stage 2 expects `image` + `messages` (OpenAI chat format, must end with an assistant turn).
 
 ---
 
@@ -167,25 +181,14 @@ Each script produces JSONL files under `data/`. Stage 1 expects `image` + `capti
 
 ### Stage 1
 
-**Single GPU:**
-
 ```bash
+# Single GPU
 accelerate launch --num_processes 1 train.py --config-section train
-```
 
-**Multi-GPU (via script):**
-
-```bash
-# Defaults: 2 GPUs, BF16, config-section=train
+# Multi-GPU
 bash scripts/train_stage1.sh
 
-# Override GPU count or config section
-NUM_PROCESSES=4 CONFIG_SECTION=train_uit_only bash scripts/train_stage1.sh
-```
-
-**Resume from checkpoint:**
-
-```bash
+# Resume
 accelerate launch train.py --config-section train --resume-from outputs/run1/checkpoint-500
 ```
 
@@ -201,9 +204,43 @@ accelerate launch train_instruction.py --resume-from outputs/instruction_run1/ch
 
 ---
 
+## Evaluation
+
+```bash
+# Stage 1 — KTVIC captioning benchmark
+python scripts/evaluate_ktvic.py \
+  --annotations data/ktvic/annotations.json \
+  --image-root data/ktvic/images \
+  --checkpoint outputs/stage1/checkpoint-2500
+
+# Stage 2 — Viet Cultural VQA
+python scripts/evaluate_viet_cultural_vqa.py \
+  --annotations data/viet_cultural_vqa/test.json \
+  --image-root data/viet_cultural_vqa/images \
+  --checkpoint outputs/instruction_run1/checkpoint-1000
+```
+
+---
+
+## Streamlit Demos
+
+Run from the project root:
+
+```bash
+# Stage 1 projector demo (captioning + projector scale diagnostics)
+streamlit run demos/stage1.py
+
+# Stage 2 instruction demo (multi-turn chat)
+streamlit run demos/instruction.py
+```
+
+Select checkpoint, device, and generation parameters in the sidebar. Both demos load eval samples automatically if the configured JSONL paths exist.
+
+---
+
 ## Configuration
 
-All configuration lives in `config.yaml`. Relevant sections:
+All configuration lives in `config.yaml`.
 
 | Section | Used by |
 |---|---|
@@ -214,6 +251,8 @@ All configuration lives in `config.yaml`. Relevant sections:
 | `prepare_coco` | `scripts/prepare_coco_data.py` |
 | `instruction_data_gpt` | `scripts/prepare_instruction_viet_sharegpt.py` |
 | `instruction_data_5cd` | `scripts/prepare_instruction_5cd_localization.py` |
+| `prepare_vietnamtourism` | `scripts/prepare_vietnamtourism_data.py` |
+| `generate_qa_vietnamtourism` | `scripts/generate_qa_vietnamtourism.py` |
 
 <details>
 <summary><strong>Key Stage 1 fields</strong></summary>
@@ -222,8 +261,8 @@ All configuration lives in `config.yaml`. Relevant sections:
 train:
   vision_model: google/siglip2-so400m-patch16-384
   llm_model: meta-llama/Llama-3.2-1B-Instruct
-  model_dtype: bfloat16      # vision tower + LLM precision
-  projector_dtype: float32   # projector precision (stable alignment)
+  model_dtype: bfloat16
+  projector_dtype: float32
   lr: 1.0e-3
   epochs: 2
   batch_size: 1
@@ -239,7 +278,7 @@ train:
 
 ```yaml
 instruction_train:
-  stage1_projector_ckpt: outputs/run1/checkpoint-2500  # warm-start source
+  stage1_projector_ckpt: outputs/run1/checkpoint-2500
   freeze_vision: true
   train_projector: true
   train_llm: true
@@ -257,20 +296,20 @@ instruction_train:
 
 ## Checkpoints
 
-Each checkpoint is a directory saved under `output_dir/checkpoint-{step}/`:
+Each checkpoint is saved under `output_dir/checkpoint-{step}/`:
 
 ```
 checkpoint-500/
 ├── projector.pt          # MLP projector weights
-├── optimizer.pt          # Optimizer state
-├── scheduler.pt          # LR scheduler state
-├── rng_state.pt          # RNG state for exact resume
+├── optimizer.pt
+├── scheduler.pt
+├── rng_state.pt
 ├── trainer_state.json    # step, epoch, best_eval_loss
 ├── training_config.yaml  # frozen copy of config at save time
 ├── model_config/         # LlavaConfig (HF format)
-├── processor/            # LlavaProcessor
-├── tokenizer/            # tokenizer files
+├── processor/
+├── tokenizer/
 └── llm/                  # LLM weights (Stage 2 only, safetensors)
 ```
 
-`best_checkpoint.json` and `last_checkpoint.json` are written to `output_dir/` as pointers. Old checkpoints are automatically rotated — `keep_last_n` controls how many are retained (best and last are always protected).
+`best_checkpoint.json` and `last_checkpoint.json` are written to `output_dir/` as pointers. Old checkpoints are rotated — `keep_last_n` controls how many are retained (best and last are always kept).

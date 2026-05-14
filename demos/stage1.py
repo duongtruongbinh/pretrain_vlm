@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 from contextlib import nullcontext
 from pathlib import Path
@@ -10,11 +9,19 @@ from PIL import Image
 import streamlit as st
 import yaml
 
+from _utils import default_device_index, detect_devices, device_label, eos_token_ids
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "stage_1_projector_coco_uit_final"
-DEFAULT_PROMPT = "<image>\nMô tả hình ảnh này: "
 
+
+def _load_default_prompt() -> str:
+    from src.prompts import render
+    return render("caption_prompt.j2")
+
+
+DEFAULT_PROMPT = _load_default_prompt()
 
 st.set_page_config(page_title="Stage 1 Projector Test", layout="wide")
 
@@ -125,44 +132,6 @@ def load_eval_samples(eval_jsonl, limit: int = 200) -> list[dict]:
     return samples
 
 
-def detect_devices() -> list[str]:
-    try:
-        import torch
-
-        if not torch.cuda.is_available():
-            return ["cpu"]
-        return [f"cuda:{idx}" for idx in range(torch.cuda.device_count())] + ["cpu"]
-    except Exception:
-        return ["cpu"]
-
-
-def default_device_index(devices: list[str]) -> int:
-    requested = os.environ.get("STREAMLIT_DEVICE", "").strip()
-    if requested in devices:
-        return devices.index(requested)
-    if "cuda:2" in devices:
-        return devices.index("cuda:2")
-    if "cuda:0" in devices:
-        return devices.index("cuda:0")
-    return 0
-
-
-def device_label(device_name: str) -> str:
-    try:
-        import torch
-
-        if not device_name.startswith("cuda") or not torch.cuda.is_available():
-            return device_name
-        device = torch.device(device_name)
-        props = torch.cuda.get_device_properties(device)
-        free_bytes, total_bytes = torch.cuda.mem_get_info(device)
-        used_gb = (total_bytes - free_bytes) / 1024**3
-        total_gb = total_bytes / 1024**3
-        return f"{device_name} | {props.name} | {used_gb:.1f}/{total_gb:.1f} GB"
-    except Exception:
-        return device_name
-
-
 @st.cache_resource(show_spinner="Đang load model và checkpoint...")
 def load_model_resource(
     checkpoint_path: str,
@@ -211,15 +180,6 @@ def move_inputs_to_device(inputs: dict, model):
         else:
             moved[key] = value.to(device=device)
     return moved
-
-
-def eos_token_ids(tokenizer) -> list[int]:
-    ids = {tokenizer.eos_token_id}
-    for token in ("<|eot_id|>", "<|end_of_text|>"):
-        token_id = tokenizer.convert_tokens_to_ids(token)
-        if isinstance(token_id, int) and token_id >= 0:
-            ids.add(token_id)
-    return sorted(i for i in ids if i is not None)
 
 
 def generate_caption(
@@ -338,15 +298,6 @@ def format_diag_row(name: str, diag: dict[str, float]) -> dict[str, str]:
     }
 
 
-def open_image_from_upload(uploaded_file) -> Image.Image:
-    return Image.open(uploaded_file).convert("RGB")
-
-
-def open_image_from_path(path: str) -> Image.Image:
-    with Image.open(path) as image:
-        return image.convert("RGB")
-
-
 def main() -> None:
     st.title("Test Stage 1 Projector")
 
@@ -432,11 +383,12 @@ def main() -> None:
 
         try:
             if uploaded_file is not None:
-                image = open_image_from_upload(uploaded_file)
+                image = Image.open(uploaded_file).convert("RGB")
                 reference = ""
                 image_path = uploaded_file.name
             elif sample is not None:
-                image = open_image_from_path(sample["image"])
+                with Image.open(sample["image"]) as img:
+                    image = img.convert("RGB")
                 reference = sample["caption"]
                 image_path = sample["image"]
             else:

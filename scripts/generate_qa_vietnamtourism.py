@@ -26,6 +26,8 @@ load_dotenv(PROJECT_ROOT / ".env")
 
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from loguru import logger  # noqa: E402
+from src.prompts import render  # noqa: E402
 from src.runtime import append_jsonl, load_config  # noqa: E402
 
 _MEDIA_TYPES: dict[str, str] = {
@@ -57,49 +59,8 @@ def _to_supported_image(image_path: Path) -> tuple[bytes, str]:
     return buf.getvalue(), "image/jpeg"
 
 
-_SYSTEM_PROMPT = (
-    "Bạn là trợ lý thị giác tiếng Việt đang nhìn thấy một bức ảnh. "
-    "Trả lời mọi câu hỏi bằng cách bạn đang thực sự quan sát ảnh đó."
-)
-
-_INSTRUCTION = """\
-Nhìn vào bức ảnh và ngữ cảnh bên dưới, thiết kế một hội thoại 3 lượt tự nhiên giữa
-user và assistant về bức ảnh này.
-
-Mỗi câu hỏi của user PHẢI đáp ứng đồng thời ba điều kiện:
-(1) Là câu hỏi thực sự (kết thúc bằng "?"), không phải lệnh như "Hãy...", "Đề xuất...".
-(2) Bắt buộc phải nhìn thấy ảnh mới trả lời được, nếu chỉ đọc tiêu đề/chú thích mà
-    không thấy ảnh thì không thể trả lời chính xác.
-(3) Câu hỏi không được chứa tên địa danh, tên sự kiện, tên người lấy từ tiêu đề/chú thích
-    trừ khi thông tin đó nhìn thấy được trong ảnh (ví dụ: đọc được trên biển tên, băng rôn).
-    Tuyệt đối không hỏi dạng "Theo chú thích...", "Dựa vào tiêu đề...", hay dùng tên địa
-    danh/sự kiện mà người xem ảnh không thể biết nếu không đọc caption.
-
-Trước khi viết mỗi câu hỏi, tự kiểm tra: "Nếu tôi che ảnh đi và chỉ đọc tiêu đề/chú thích
-hoặc dựa vào kiến thức chung, tôi có thể trả lời câu này không?" — Nếu có, bỏ câu đó và
-đặt câu hỏi khác gắn với chi tiết nhìn thấy trong ảnh.
-
-Câu hỏi có thể về: số lượng đối tượng, màu sắc, vị trí không gian, hành động, trang phục,
-biểu cảm, hoặc ý nghĩa văn hóa/du lịch gắn với chi tiết nhìn thấy trong ảnh.
-Nếu ảnh có chi tiết văn hóa hoặc du lịch nhận ra được (trang phục truyền thống, địa danh,
-hoạt động đặc trưng...), hãy khai thác ý nghĩa của chi tiết đó trong một lượt.
-Câu hỏi từ lượt 2 trở đi phải nối tiếp nội dung đã nói ở lượt trước.
-Câu trả lời phức tạp nên có giải thích cụ thể. Nếu hỏi về thứ không có trong ảnh,
-assistant trả lời phủ định thay vì bịa đặt.
-
-Trả về JSON hợp lệ, không thêm nội dung nào khác:
-{
-  "description": "mô tả chi tiết bức ảnh kết hợp tiêu đề/chú thích",
-  "conversation": [
-    {"role": "user", "content": "...?"},
-    {"role": "assistant", "content": "..."},
-    {"role": "user", "content": "...?"},
-    {"role": "assistant", "content": "..."},
-    {"role": "user", "content": "...?"},
-    {"role": "assistant", "content": "..."}
-  ]
-}\
-"""
+_SYSTEM_PROMPT = render("qa_gen_system.j2")
+_INSTRUCTION = render("qa_gen_instruction.j2")
 
 
 def build_user_message(title: str, caption: str, image_path: Path) -> list[dict]:
@@ -272,7 +233,7 @@ def save_batch_result_text(
                 raise ValueError(f"empty content (finish_reason={choice.get('finish_reason')})")
             description, conversation = parse_qa_response(content)
         except Exception as exc:
-            print(f"[warn] skipping {custom_id}: {exc}")
+            logger.warning("skipping {}: {}", custom_id, exc)
             continue
         append_jsonl(
             batch_results,
@@ -292,27 +253,27 @@ def save_batch_result_text(
     return saved
 
 
-def print_batch_errors(client, batch) -> None:
+def _log_batch_errors(client, batch) -> None:
     errors = getattr(getattr(batch, "errors", None), "data", None) or []
     for err in errors[:5]:
-        print(f"  error sample: {getattr(err, 'message', err)}")
+        logger.error("  error sample: {}", getattr(err, "message", err))
     error_file_id = getattr(batch, "error_file_id", None)
     if error_file_id:
         err_text = client.files.content(error_file_id).text
         for err_line in err_text.splitlines()[:5]:
-            print(f"  error sample: {err_line.strip()}")
+            logger.error("  error sample: {}", err_line.strip())
 
 
 def save_completed_batch(
     client, batch, id_to_record: dict[str, dict], batch_results: Path, done_ids: set[str]
 ) -> int:
     if getattr(batch, "status", None) != "completed":
-        print(f"[warn] batch {batch.id} ended with status={batch.status}, skipping")
-        print_batch_errors(client, batch)
+        logger.warning("batch {} ended with status={}, skipping", batch.id, batch.status)
+        _log_batch_errors(client, batch)
         return 0
     if not getattr(batch, "output_file_id", None):
-        print(f"[warn] batch {batch.id} completed but output_file_id is None (all requests may have failed)")
-        print_batch_errors(client, batch)
+        logger.warning("batch {} completed but output_file_id is None (all requests may have failed)", batch.id)
+        _log_batch_errors(client, batch)
         return 0
     result_text = client.files.content(batch.output_file_id).text
     return save_batch_result_text(result_text, id_to_record, batch_results, done_ids)
@@ -362,7 +323,7 @@ def submit_batch_chunk(
     batch = client.batches.create(
         input_file_id=uploaded.id, endpoint="/v1/chat/completions", completion_window="24h"
     )
-    print(f"[qa-gen] chunk {chunk_index + 1}/{total_chunks} ({len(chunk)} reqs) → {batch.id}")
+    logger.info("[qa-gen] chunk {}/{} ({} reqs) → {}", chunk_index + 1, total_chunks, len(chunk), batch.id)
     return batch
 
 
@@ -383,7 +344,7 @@ def main() -> None:
         raise FileNotFoundError(f"Run crawl script first: {raw_jsonl}")
 
     done_ids = read_done_image_ids(batch_results)
-    print(f"[qa-gen] {len(done_ids)} already generated, skipping")
+    logger.info("[qa-gen] {} already generated, skipping", len(done_ids))
 
     records: list[dict] = []
     with raw_jsonl.open(encoding="utf-8") as fh:
@@ -403,16 +364,16 @@ def main() -> None:
                 records.append(rec)
 
     if not records:
-        print("[qa-gen] nothing to generate, done")
+        logger.info("[qa-gen] nothing to generate, done")
         return
 
-    print(f"[qa-gen] building {len(records)} batch requests ...")
+    logger.info("[qa-gen] building {} batch requests ...", len(records))
     valid: list[tuple[dict, dict]] = []
     for rec in records:
         try:
             valid.append((rec, build_batch_request(rec, model=model, max_tokens=max_tokens)))
         except Exception as exc:
-            print(f"[warn] skipping {rec['image_id']}: {exc}")
+            logger.warning("skipping {}: {}", rec["image_id"], exc)
 
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
@@ -430,16 +391,16 @@ def main() -> None:
             chunk_bytes = 0
         chunks[-1].append(pair)
         chunk_bytes += line_bytes
-    print(
-        f"[qa-gen] splitting into {len(chunks)} batch(es)"
-        f" (≤{max_chunk_bytes // 1024 // 1024} MB each, max_active={max_active_batches}) ..."
+    logger.info(
+        "[qa-gen] splitting into {} batch(es) (≤{} MB each, max_active={}) ...",
+        len(chunks), max_chunk_bytes // 1024 // 1024, max_active_batches,
     )
 
     id_to_record = {f"img-{rec['image_id']}": rec for rec in records}
     saved = 0
     active_batches: dict[str, object] = {}
     next_chunk_index = 0
-    print("[qa-gen] polling (may take minutes to hours) ...")
+    logger.info("[qa-gen] polling (may take minutes to hours) ...")
     try:
         while next_chunk_index < len(chunks) or active_batches:
             while next_chunk_index < len(chunks) and len(active_batches) < max_active_batches:
@@ -453,15 +414,15 @@ def main() -> None:
             for bid in active_batches:
                 b = client.batches.retrieve(bid)
                 counts = b.request_counts
-                print(
-                    f"  [{bid[-12:]}] status={b.status}"
-                    f" completed={getattr(counts, 'completed', '?')}/{getattr(counts, 'total', '?')}",
-                    flush=True,
+                logger.info(
+                    "  [{}] status={} completed={}/{}",
+                    bid[-12:], b.status,
+                    getattr(counts, "completed", "?"), getattr(counts, "total", "?"),
                 )
                 if b.status == "completed":
                     batch_saved = save_completed_batch(client, b, id_to_record, batch_results, done_ids)
                     saved += batch_saved
-                    print(f"  [{bid[-12:]}] saved={batch_saved}", flush=True)
+                    logger.info("  [{}] saved={}", bid[-12:], batch_saved)
                 elif b.status in _FINAL_BATCH_STATUSES:
                     save_completed_batch(client, b, id_to_record, batch_results, done_ids)
                 else:
@@ -472,13 +433,13 @@ def main() -> None:
                 time.sleep(60)
     except KeyboardInterrupt:
         if active_batches:
-            print("\n[qa-gen] interrupted; these submitted batches may still finish on OpenAI:")
+            logger.info("[qa-gen] interrupted; these submitted batches may still finish on OpenAI:")
             for bid in active_batches:
-                print(f"  {bid}")
-            print("[qa-gen] completed batches already seen by this process were saved before exit.")
+                logger.info("  {}", bid)
+            logger.info("[qa-gen] completed batches already seen by this process were saved before exit.")
         raise
 
-    print(f"[qa-gen] done — {saved} records saved to {batch_results}")
+    logger.info("[qa-gen] done — {} records saved to {}", saved, batch_results)
 
 
 if __name__ == "__main__":

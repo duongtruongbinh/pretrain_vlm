@@ -10,6 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from loguru import logger
 from src.runtime import load_config
 
 
@@ -148,7 +149,7 @@ def main() -> None:
                     conversation = conversation_from_record(rec)
                 except ValueError as exc:
                     counters["skipped_invalid_conversation"] += 1
-                    print(f"[warn] skipping {image_id}: {exc}")
+                    logger.warning("skipping {}: {}", image_id, exc)
                     continue
                 if not conversation:
                     counters["skipped_empty_conversation"] += 1
@@ -174,12 +175,12 @@ def main() -> None:
         for h in handles.values():
             h.close()
 
-    print("[prepare] done")
+    logger.info("[prepare] done")
     for split in ("train", "val", "test"):
-        print(f"  {split}: {counters[f'{split}_images']} images → {split}.jsonl")
-    print(f"  skipped missing images: {counters['skipped_missing_image']}")
-    print(f"  skipped empty conv:     {counters['skipped_empty_conversation']}")
-    print(f"  skipped invalid conv:   {counters['skipped_invalid_conversation']}")
+        logger.info("  {}: {} images → {}.jsonl", split, counters[f"{split}_images"], split)
+    logger.info("  skipped missing images: {}", counters["skipped_missing_image"])
+    logger.info("  skipped empty conv:     {}", counters["skipped_empty_conversation"])
+    logger.info("  skipped invalid conv:   {}", counters["skipped_invalid_conversation"])
 
     (output_dir / "prepare_report.json").write_text(
         json.dumps(

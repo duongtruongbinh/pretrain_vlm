@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 from contextlib import nullcontext
 from pathlib import Path
@@ -10,12 +9,19 @@ from PIL import Image
 import streamlit as st
 import yaml
 
+from _utils import default_device_index, detect_devices, device_label, eos_token_ids
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "instruction_run2"
-DEFAULT_SYSTEM_PROMPT = (
-    "Bạn là một trợ lý thị giác tiếng Việt, trả lời trung thực và chỉ dựa trên nội dung nhìn thấy trong ảnh."
-)
+
+
+def _load_default_system_prompt() -> str:
+    from src.prompts import render
+    return render("vqa_system.j2")
+
+
+DEFAULT_SYSTEM_PROMPT = _load_default_system_prompt()
 
 st.set_page_config(page_title="Instruction Model Test", layout="wide")
 
@@ -133,40 +139,6 @@ def load_eval_samples(eval_jsonl, limit: int = 200) -> list[dict]:
     return samples
 
 
-def detect_devices() -> list[str]:
-    try:
-        import torch
-
-        if not torch.cuda.is_available():
-            return ["cpu"]
-        return [f"cuda:{i}" for i in range(torch.cuda.device_count())] + ["cpu"]
-    except Exception:
-        return ["cpu"]
-
-
-def default_device_index(devices: list[str]) -> int:
-    requested = os.environ.get("STREAMLIT_DEVICE", "").strip()
-    if requested in devices:
-        return devices.index(requested)
-    for preferred in ("cuda:2", "cuda:0"):
-        if preferred in devices:
-            return devices.index(preferred)
-    return 0
-
-
-def device_label(name: str) -> str:
-    try:
-        import torch
-
-        if not name.startswith("cuda") or not torch.cuda.is_available():
-            return name
-        props = torch.cuda.get_device_properties(torch.device(name))
-        free, total = torch.cuda.mem_get_info(torch.device(name))
-        return f"{name} | {props.name} | {(total - free) / 1024**3:.1f}/{total / 1024**3:.1f} GB"
-    except Exception:
-        return name
-
-
 @st.cache_resource(show_spinner="Đang load model...")
 def load_model_resource(
     checkpoint_path: str,
@@ -200,15 +172,6 @@ def load_model_resource(
     model.requires_grad_(False)
     model.to(device)
     return model, collator, step
-
-
-def eos_token_ids(tokenizer) -> list[int]:
-    ids = {tokenizer.eos_token_id}
-    for token in ("<|eot_id|>", "<|end_of_text|>"):
-        tid = tokenizer.convert_tokens_to_ids(token)
-        if isinstance(tid, int) and tid >= 0:
-            ids.add(tid)
-    return sorted(i for i in ids if i is not None)
 
 
 def generate_reply(
@@ -269,7 +232,6 @@ def main() -> None:
         st.error(f"Không đọc được config.yaml: {error}")
         st.stop()
 
-    # --- Sidebar ---
     with st.sidebar:
         st.header("Checkpoint")
         output_dir_text = st.text_input("Output dir", value=str(DEFAULT_OUTPUT_DIR))
@@ -336,7 +298,6 @@ def main() -> None:
             load_model_resource.clear()
             st.rerun()
 
-    # --- Image selection ---
     samples = load_eval_samples(cfg.get("eval_jsonl", []), limit=200)
     uploaded_file = st.file_uploader("Upload ảnh", type=["jpg", "jpeg", "png", "webp"])
 
@@ -382,7 +343,6 @@ def main() -> None:
                     else:
                         st.markdown(f"**Assistant:** {content}")
 
-    # --- Chat interface ---
     with right:
         session_key = f"chat_{image_key}"
         if session_key not in st.session_state:

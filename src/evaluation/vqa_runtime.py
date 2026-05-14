@@ -11,14 +11,11 @@ from PIL import Image
 
 from src.collators import InstructionCollator
 from src.modeling import build_model
+from src.prompts import render
 from src.runtime import load_config
 from src.training.checkpoint import load_full_checkpoint
 
-
-DEFAULT_SYSTEM_PROMPT = (
-    "Bạn là một trợ lý thị giác tiếng Việt, trả lời trung thực và chỉ dựa trên nội dung nhìn thấy trong ảnh."
-)
-QUESTION_TEMPLATE = "Trả lời ngắn gọn câu hỏi sau dựa trên ảnh: {question}"
+DEFAULT_SYSTEM_PROMPT = render("vqa_system.j2")
 
 
 def resolve_device(device_name: str):
@@ -82,7 +79,6 @@ def generate_answer(
     question: str,
     *,
     system_prompt: str,
-    question_template: str,
     max_new_tokens: int,
 ) -> tuple[str, str]:
     device = next(model.parameters()).device
@@ -90,7 +86,7 @@ def generate_answer(
     tokenizer = collator.tokenizer
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": question_template.format(question=question)},
+        {"role": "user", "content": render("vqa_question.j2", question=question)},
     ]
     input_ids, attention_mask, pixel_values = collator.build_prompt_tensors(messages, image.convert("RGB"), device=device)
     pixel_values = pixel_values.to(dtype=vision_dtype)

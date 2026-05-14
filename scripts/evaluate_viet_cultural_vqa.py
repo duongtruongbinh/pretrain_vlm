@@ -17,7 +17,6 @@ from src.evaluation.io import read_json_or_jsonl, write_json, write_jsonl  # noq
 from src.evaluation.metrics import summarize_vqa_scores  # noqa: E402
 from src.evaluation.vqa_runtime import (  # noqa: E402
     DEFAULT_SYSTEM_PROMPT,
-    QUESTION_TEMPLATE,
     generate_answer,
     load_stage2_model,
 )
@@ -36,7 +35,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-new-tokens", type=int, default=48)
     parser.add_argument("--max-text-tokens", type=int, default=None)
     parser.add_argument("--system-prompt", default=DEFAULT_SYSTEM_PROMPT)
-    parser.add_argument("--question-template", default=QUESTION_TEMPLATE)
     return parser.parse_args()
 
 
@@ -112,7 +110,6 @@ def evaluate_records(args: argparse.Namespace) -> tuple[list[dict], dict]:
                     image,
                     record["question"],
                     system_prompt=args.system_prompt,
-                    question_template=args.question_template,
                     max_new_tokens=args.max_new_tokens,
                 )
             rows.append(

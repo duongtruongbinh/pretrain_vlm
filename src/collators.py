@@ -7,9 +7,9 @@ import warnings
 import torch
 
 from src.modeling import IMAGE_TOKEN, build_processor
+from src.prompts import render
 
-_CAPTION_PROMPT = "Mô tả hình ảnh này: "
-PROMPT_TEMPLATE = f"{IMAGE_TOKEN}\n{_CAPTION_PROMPT}"
+PROMPT_TEMPLATE = render("caption_prompt.j2")
 
 
 def _image_seq_length(processor) -> int:
