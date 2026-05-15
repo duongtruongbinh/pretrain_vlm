@@ -12,6 +12,7 @@ from tqdm.auto import tqdm
 from transformers import get_cosine_schedule_with_warmup
 
 from src.collators import PROMPT_TEMPLATE, CaptionCollator
+from src.inference import eos_token_ids
 from src.data import ImageCaptionDataset
 from src.modeling import build_model, freeze_components
 from src.runtime import (
@@ -35,8 +36,7 @@ from src.training import (
 
 
 def _parse_args() -> argparse.Namespace:
-    """Parse runtime-only arguments that should not live in config.yaml."""
-
+    # runtime-only args that should not live in config.yaml
     parser = argparse.ArgumentParser(description="Caption projector pretraining.")
     parser.add_argument("--config-section", type=str, default="train")
     parser.add_argument("--resume-from", type=str, default=None)
@@ -53,7 +53,7 @@ def _select_eval_samples(records: list[dict], sample_count: int = 5) -> list[dic
 def _log_eval_samples(model, collator, eval_samples, accelerator, max_new_tokens):
     unwrapped = accelerator.unwrap_model(model)
     tokenizer = collator.tokenizer
-    eos_ids = sorted({tokenizer.eos_token_id, tokenizer.convert_tokens_to_ids("<|end_of_text|>")})
+    eos_ids = eos_token_ids(tokenizer)
     lines = []
     for idx, sample in enumerate(eval_samples, 1):
         try:
@@ -79,13 +79,12 @@ def _log_eval_samples(model, collator, eval_samples, accelerator, max_new_tokens
         input_len = inputs["input_ids"].shape[1]
         generated_text = tokenizer.decode(generated_ids[0, input_len:], skip_special_tokens=True).strip()
         raw_generated_text = tokenizer.decode(generated_ids[0, input_len:], skip_special_tokens=False).strip()
-        for line in [
+        lines.extend([
             f"[sample {idx}] prediction: {generated_text or '<empty>'}",
             f"[sample {idx}] prediction_raw: {raw_generated_text or '<empty>'}",
             f"[sample {idx}] reference: {sample['caption']}",
             f"[sample {idx}] image: {sample['image']}",
-        ]:
-            lines.append(line)
+        ])
     return lines
 
 

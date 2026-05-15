@@ -12,6 +12,7 @@ from tqdm.auto import tqdm
 from transformers import Adafactor, get_cosine_schedule_with_warmup
 
 from src.collators import InstructionCollator
+from src.inference import eos_token_ids
 from src.data import ImageInstructionDataset
 from src.modeling import build_model, freeze_components, set_component_modes
 from src.runtime import (
@@ -37,8 +38,7 @@ from src.training import (
 
 
 def _parse_args() -> argparse.Namespace:
-    """Parse runtime-only arguments that should not live in config.yaml."""
-
+    # runtime-only args that should not live in config.yaml
     parser = argparse.ArgumentParser(description="Instruction tuning.")
     parser.add_argument("--resume-from", type=str, default=None)
     return parser.parse_args()
@@ -123,11 +123,15 @@ def _resolve_resume_sources(resume_dir: Path | None, base_llm_model: str) -> tup
 def _log_eval_samples(model, collator, eval_samples, accelerator, max_new_tokens):
     unwrapped = accelerator.unwrap_model(model)
     tokenizer = collator.tokenizer
-    eos_ids = sorted({tokenizer.eos_token_id, tokenizer.convert_tokens_to_ids("<|end_of_text|>")})
+    eos_ids = eos_token_ids(tokenizer)
     lines = []
     for idx, sample in enumerate(eval_samples, 1):
-        with Image.open(sample["image"]) as img:
-            img = img.convert("RGB")
+        try:
+            with Image.open(sample["image"]) as img:
+                img = img.convert("RGB")
+        except Exception as e:
+            lines.append(f"[sample {idx}] failed to load {sample['image']}: {e}")
+            continue
         prompt_ids, attn_mask, pixel_values = collator.build_prompt_tensors(
             sample["messages"][:-1], img, device=accelerator.device
         )
@@ -146,14 +150,13 @@ def _log_eval_samples(model, collator, eval_samples, accelerator, max_new_tokens
         input_len = prompt_ids.shape[1]
         generated_text = tokenizer.decode(generated_ids[0, input_len:], skip_special_tokens=True).strip()
         raw_generated_text = tokenizer.decode(generated_ids[0, input_len:], skip_special_tokens=False).strip()
-        for line in [
+        lines.extend([
             f"[sample {idx}] sample_type: {sample.get('sample_type', 'unknown')}",
             f"[sample {idx}] user: {_latest_user_message(sample['messages'][:-1])}",
             f"[sample {idx}] prediction: {generated_text or '<empty>'}",
             f"[sample {idx}] prediction_raw: {raw_generated_text or '<empty>'}",
             f"[sample {idx}] reference: {sample['messages'][-1]['content']}",
-        ]:
-            lines.append(line)
+        ])
     return lines
 
 

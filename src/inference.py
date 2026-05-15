@@ -63,12 +63,23 @@ def eos_token_ids(tokenizer) -> list[int]:
     return sorted(i for i in ids if i is not None)
 
 
+def _move_inputs_to_device(inputs: dict, device, vision_dtype) -> dict:
+    moved = {}
+    for key, value in inputs.items():
+        if not torch.is_tensor(value):
+            moved[key] = value
+        elif key == "pixel_values":
+            moved[key] = value.to(device=device, dtype=vision_dtype)
+        else:
+            moved[key] = value.to(device=device)
+    return moved
+
+
 # ---------------------------------------------------------------------------
 # Checkpoint source resolution
 # ---------------------------------------------------------------------------
 
 def resolve_stage1_tokenizer(checkpoint_path: str | Path, fallback_llm_model: str = "") -> str:
-    """Return tokenizer source for a Stage-1 checkpoint directory."""
     tokenizer_dir = Path(checkpoint_path).expanduser().resolve() / "tokenizer"
     if not tokenizer_dir.exists():
         if fallback_llm_model:
@@ -78,7 +89,6 @@ def resolve_stage1_tokenizer(checkpoint_path: str | Path, fallback_llm_model: st
 
 
 def resolve_stage2_sources(checkpoint_path: str | Path) -> tuple[str, str]:
-    """Return (llm_source, tokenizer_source) for a Stage-2 checkpoint directory."""
     checkpoint = Path(checkpoint_path).expanduser().resolve()
     llm_dir = checkpoint / "llm"
     tokenizer_dir = checkpoint / "tokenizer"
@@ -94,7 +104,6 @@ def resolve_stage2_sources(checkpoint_path: str | Path) -> tuple[str, str]:
 # ---------------------------------------------------------------------------
 
 def load_stage1_model(checkpoint_path: str | Path, config_section: str, device_name: str):
-    """Load Stage-1 (projector-only) model for caption evaluation."""
     from src.modeling import build_model, build_processor
     from src.runtime import load_config
     from src.training import load_projector_checkpoint
@@ -126,14 +135,7 @@ def generate_caption(model, processor, image: Image.Image, prompt: str, max_new_
     vision_dtype = next(model.vision_tower.parameters()).dtype
     tokenizer = processor.tokenizer
     inputs = processor(text=prompt, images=image.convert("RGB"), return_tensors="pt")
-    moved = {}
-    for key, value in inputs.items():
-        if not torch.is_tensor(value):
-            moved[key] = value
-        elif key == "pixel_values":
-            moved[key] = value.to(device=device, dtype=vision_dtype)
-        else:
-            moved[key] = value.to(device=device)
+    moved = _move_inputs_to_device(inputs, device, vision_dtype)
 
     autocast_context = nullcontext()
     if device.type == "cuda" and vision_dtype in (torch.float16, torch.bfloat16):
@@ -159,7 +161,6 @@ def generate_caption(model, processor, image: Image.Image, prompt: str, max_new_
 def load_stage2_model(
     checkpoint_path: str | Path, config_section: str, device_name: str, max_text_tokens: int | None
 ):
-    """Load Stage-2 (instruction-tuned) model for VQA evaluation."""
     from src.collators import InstructionCollator
     from src.modeling import build_model
     from src.runtime import load_config
@@ -192,7 +193,8 @@ def load_stage2_model(
 
 
 def extract_short_answer(text: str) -> str:
-    first_line = str(text).strip().splitlines()[0] if str(text).strip() else ""
+    stripped = str(text).strip()
+    first_line = stripped.splitlines()[0] if stripped else ""
     answer = re.sub(
         r"^(?:câu\s+)?(?:trả\s+lời|đáp\s+án|answer)\s*(?:là|[:：-])\s*",
         "",

@@ -13,8 +13,6 @@ from src.runtime import resolve_record_image_path
 
 
 class ImageCaptionDataset(Dataset):
-    """Load image-caption pairs from one or more JSONL files."""
-
     def __init__(self, jsonl_path: str | Path | list[str | Path]):
         paths = [jsonl_path] if isinstance(jsonl_path, (str, Path)) else jsonl_path
         self.jsonl_paths = [Path(path).expanduser().resolve() for path in paths]
@@ -85,8 +83,6 @@ def _validate_messages(messages, *, sample_id: str) -> None:
 
 
 class ImageInstructionDataset(Dataset):
-    """Load image-chat examples for instruction tuning from one or more JSONL files."""
-
     def __init__(self, jsonl_path: str | Path | list[str | Path]):
         paths = [jsonl_path] if isinstance(jsonl_path, (str, Path)) else jsonl_path
         self.jsonl_paths = [Path(p).expanduser().resolve() for p in paths]

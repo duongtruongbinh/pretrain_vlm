@@ -41,7 +41,6 @@ _INSTRUCTION = render("qa_gen_instruction.j2")
 
 
 def _to_supported_image(image_path: Path) -> tuple[bytes, str]:
-    """Return (bytes, media_type), converting to JPEG if the format is unsupported by OpenAI."""
     raw = image_path.read_bytes()
     img = Image.open(io.BytesIO(raw))
     if img.format in _OPENAI_SUPPORTED_FORMATS:
@@ -80,14 +79,9 @@ def _strip_json_fence(content: str) -> str:
 
 
 def _repair_unescaped_quotes(text: str) -> str:
-    """Escape unescaped double-quotes inside JSON string values.
-
-    Models sometimes output Vietnamese text with unescaped " characters inside
-    string values, e.g. "description": "...có tiêu đề "Lễ hội đền Hà" và...".
-    Uses a state machine: a closing " is one whose next non-whitespace char is
-    , } ] " or : (structural JSON); otherwise the " is inside a value and must
-    be escaped.
-    """
+    # Models emit Vietnamese text with unescaped " inside string values,
+    # e.g. "description": "...có tiêu đề "Lễ hội đền Hà" và...".
+    # State machine: a " is closing if next non-ws char is , } ] " or : (structural); else escape it.
     in_string = False
     result = []
     i = 0

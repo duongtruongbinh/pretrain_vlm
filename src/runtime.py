@@ -33,8 +33,6 @@ def render(template_name: str, **kwargs: object) -> str:
 
 
 def load_config(section_name: str) -> dict:
-    """Load a named config section from `config.yaml`."""
-
     if not CONFIG_PATH.exists():
         raise FileNotFoundError(f"Missing config file: {CONFIG_PATH}")
 
@@ -50,10 +48,7 @@ def load_config(section_name: str) -> dict:
     return section
 
 
-
 def resolve_record_image_path(image_value: str | Path, *, jsonl_path: Path) -> str:
-    """Resolve an image path stored in a JSONL record."""
-
     raw_path = Path(str(image_value).strip()).expanduser()
     if raw_path.is_absolute():
         return str(raw_path)
@@ -75,8 +70,6 @@ def set_seed(seed: int) -> None:
 
 
 def setup_logger(output_dir: str | Path, accelerator):
-    """Configure Loguru sinks for the main process only."""
-
     logger.remove()
     if not accelerator.is_main_process:
         return logger
@@ -119,7 +112,7 @@ class EpochShuffleSampler(Sampler[int]):
 def build_weighted_sampler(
     dataset, seed: int, source_weights: list[float] | None = None
 ) -> WeightedRandomSampler:
-    """Per-source weighted sampling; None weights = equal proportion across sources."""
+    # None weights → equal proportion across sources
     n_sources = len(dataset.jsonl_paths)
     counts = [0] * n_sources
     for src_idx in dataset.source_indices:

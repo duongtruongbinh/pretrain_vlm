@@ -181,7 +181,7 @@ def _supervised_tokens(batch: dict[str, Any]) -> torch.Tensor:
 # ---------------------------------------------------------------------------
 
 def _remap_projector_state(state_dict: dict) -> dict:
-    """Map legacy sequential projector keys to HF LLaVA projector keys."""
+    # Legacy checkpoints use sequential keys (0.weight, 2.weight); HF LLaVA expects linear_1/linear_2.
     mapping = {
         "0.weight": "linear_1.weight",
         "0.bias": "linear_1.bias",

@@ -21,8 +21,6 @@ def _image_seq_length(processor) -> int:
 
 
 class CaptionCollator:
-    """Collate image-caption samples into LlavaProcessor tensors with prompt masking."""
-
     def __init__(self, vision_model_name: str, llm_model_name: str):
         self.processor = build_processor(vision_model_name, llm_model_name)
         self.tokenizer = self.processor.tokenizer
@@ -63,8 +61,6 @@ class CaptionCollator:
 
 
 class InstructionCollator:
-    """Collate instruction samples into tensors with chat-template prompt masking."""
-
     def __init__(self, vision_model_name: str, llm_model_name: str, max_text_tokens: int):
         self.processor = build_processor(vision_model_name, llm_model_name)
         self.tokenizer = self.processor.tokenizer
@@ -92,7 +88,6 @@ class InstructionCollator:
         return messages, full_text
 
     def _assistant_token_spans(self, messages: list[dict]) -> list[tuple[int, int]]:
-        """Return (start, end) token index for every assistant turn in the conversation."""
         spans = []
         for i, msg in enumerate(messages):
             if msg["role"] != "assistant":

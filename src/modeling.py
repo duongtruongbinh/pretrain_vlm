@@ -19,16 +19,8 @@ DEFAULT_PROJECTOR_DTYPE = "float32"
 
 
 def build_processor(vision_model_name: str, llm_model_name: str) -> LlavaProcessor:
-    """
-    Build a fully configured LlavaProcessor.
-
-    patch_size and vision_feature_select_strategy are read from the vision
-    model config so the processor inserts the correct number of <image> tokens.
-    Without these, processor(text="<image>...", images=img) would insert only
-    one token while the model expects num_patches tokens — causing a runtime
-    shape mismatch in _merge_input_ids_with_image_features.
-    """
-
+    # patch_size must come from the vision model config so the processor inserts
+    # the correct number of <image> tokens; otherwise shape mismatch at forward.
     vision_root_config = AutoConfig.from_pretrained(vision_model_name)
     vision_config = getattr(vision_root_config, "vision_config", vision_root_config)
     patch_size = vision_config.patch_size  # 16 for siglip2-so400m-patch16-384
@@ -59,14 +51,7 @@ def build_model(
     image_token_id: int | None = None,
     vocab_size: int | None = None,
 ) -> LlavaForConditionalGeneration:
-    """
-    Build LlavaForConditionalGeneration from pretrained SigLIP2 + Llama weights.
-
-    Pass image_token_id and vocab_size from an already-built processor to avoid
-    a redundant processor build. If None, build_processor() resolves them.
-    projector_state: if provided, load into multi_modal_projector (stage-1 warm-start).
-    """
-
+    # image_token_id + vocab_size from caller's processor avoids a redundant build.
     dtype = _resolve_dtype(model_dtype)
     resolved_projector_dtype = _resolve_dtype(projector_dtype) or torch.float32
 
@@ -116,8 +101,6 @@ def build_model(
 def freeze_components(
     model: LlavaForConditionalGeneration, freeze_vision: bool, train_projector: bool, train_llm: bool
 ) -> None:
-    """Enable/disable gradients for each major model component."""
-
     model.vision_tower.requires_grad_(not freeze_vision)
     model.multi_modal_projector.requires_grad_(train_projector)
     model.language_model.requires_grad_(train_llm)
@@ -129,8 +112,6 @@ def freeze_components(
 def set_component_modes(
     model: LlavaForConditionalGeneration, freeze_vision: bool, train_projector: bool, train_llm: bool
 ) -> None:
-    """Set `.train()` modes for each major model component."""
-
     model.vision_tower.train(not freeze_vision)
     model.multi_modal_projector.train(train_projector)
     model.language_model.train(train_llm)
@@ -166,15 +147,8 @@ def _cast_runtime_dtypes(
 
 
 def _patch_projector_input_dtype(projector) -> None:
-    """
-    HF LLaVA passes vision-tower hidden states directly into the projector.
-
-    When the frozen vision tower runs in bf16 but the projector is kept in fp32
-    for stable stage-1 alignment, the stock projector forward raises a dtype
-    mismatch in the first Linear. Keep the original module and state_dict keys,
-    but cast inputs to the projector weight dtype before the linear layers.
-    """
-
+    # Vision tower (bf16) feeds directly into projector (fp32 during stage-1).
+    # Cast input to projector weight dtype to avoid Linear dtype mismatch.
     def forward(self, image_features):
         projector_dtype = self.linear_1.weight.dtype
         if image_features.dtype != projector_dtype:
@@ -187,14 +161,9 @@ def _patch_projector_input_dtype(projector) -> None:
 
 
 def _patch_last_hidden_state_image_features(model: LlavaForConditionalGeneration) -> None:
-    """
-    Stock HF LLaVA calls vision_tower with output_hidden_states=True, which retains
-    every layer's activations in memory. For SigLIP2-so400m-384px (576 tokens × 48 layers)
-    this is hundreds of MB of VRAM with no benefit when vision_feature_layer=-1, because
-    hidden_states[-1] == last_hidden_state. This patch uses output_hidden_states=False and
-    reads last_hidden_state directly, giving identical results at much lower peak VRAM.
-    """
-
+    # Stock HF LLaVA passes output_hidden_states=True, retaining all 48 intermediate
+    # activations (~hundreds MB VRAM). For vision_feature_layer=-1, hidden_states[-1]
+    # equals last_hidden_state, so use output_hidden_states=False instead.
     def get_image_features(
         self,
         pixel_values: torch.FloatTensor,

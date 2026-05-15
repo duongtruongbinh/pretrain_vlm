@@ -12,6 +12,7 @@ from _utils import (
     detect_devices, device_label, eos_token_ids,
     load_checkpoint_config, merge_checkpoint_config, read_checkpoint_pointer,
 )
+from src.inference import _move_inputs_to_device
 
 from src.runtime import PROJECT_ROOT
 
@@ -116,22 +117,6 @@ def load_model_resource(
     return model, processor, step
 
 
-def move_inputs_to_device(inputs: dict, model):
-    import torch
-
-    device = next(model.parameters()).device
-    vision_dtype = next(model.vision_tower.parameters()).dtype
-    moved = {}
-    for key, value in inputs.items():
-        if not torch.is_tensor(value):
-            moved[key] = value
-        elif key == "pixel_values":
-            moved[key] = value.to(device=device, dtype=vision_dtype)
-        else:
-            moved[key] = value.to(device=device)
-    return moved
-
-
 def generate_caption(
     model,
     processor,
@@ -146,10 +131,10 @@ def generate_caption(
 
     image = image.convert("RGB")
     tokenizer = processor.tokenizer
-    inputs = processor(text=prompt, images=image, return_tensors="pt")
-    inputs = move_inputs_to_device(inputs, model)
     device = next(model.parameters()).device
     vision_dtype = next(model.vision_tower.parameters()).dtype
+    inputs = processor(text=prompt, images=image, return_tensors="pt")
+    inputs = _move_inputs_to_device(inputs, device, vision_dtype)
     use_sampling = temperature > 0.0
 
     autocast_context = nullcontext()
@@ -191,11 +176,12 @@ def projector_scale_diagnostics(model, processor, image: Image.Image, prompt: st
 
     image = image.convert("RGB")
     tokenizer = processor.tokenizer
+    device = next(model.parameters()).device
+    vision_dtype = next(model.vision_tower.parameters()).dtype
     inputs = processor(text=prompt, images=image, return_tensors="pt")
-    inputs = move_inputs_to_device(inputs, model)
+    inputs = _move_inputs_to_device(inputs, device, vision_dtype)
     input_ids = inputs["input_ids"]
     pixel_values = inputs["pixel_values"]
-    device = next(model.parameters()).device
     image_token_id = tokenizer.convert_tokens_to_ids("<image>")
     text_mask = input_ids != image_token_id
     if tokenizer.pad_token_id is not None:
