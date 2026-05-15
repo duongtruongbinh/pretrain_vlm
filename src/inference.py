@@ -11,8 +11,7 @@ from typing import Any
 import torch
 from PIL import Image
 
-from src.prompts import render
-
+from src.runtime import render
 
 DEFAULT_SYSTEM_PROMPT = render("vqa_system.j2")
 

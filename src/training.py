@@ -266,7 +266,7 @@ def update_checkpoint_pointer(
     metric_name: str | None = None,
     metric_value: float | None = None,
 ) -> None:
-    payload = {"checkpoint": str(Path(checkpoint_path).resolve()), "step": int(step)}
+    payload = {"checkpoint": str(Path(checkpoint_path).expanduser().resolve()), "step": int(step)}
     if metric_name is not None:
         payload["metric_name"] = metric_name
         payload["metric_value"] = metric_value
@@ -277,7 +277,7 @@ def rotate_checkpoints(
     output_dir: str | Path, keep_last_n: int, protected_paths: set[str | Path] | None = None
 ) -> None:
     output_path = Path(output_dir)
-    protected = {Path(p).resolve() for p in protected_paths or set()}
+    protected = {Path(p).expanduser().resolve() for p in protected_paths or set()}
     for pointer in ("best_checkpoint.json", "last_checkpoint.json"):
         pointer_path = output_path / pointer
         if pointer_path.exists():

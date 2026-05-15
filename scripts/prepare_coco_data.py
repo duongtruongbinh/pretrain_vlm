@@ -13,8 +13,6 @@ from pathlib import Path
 from datasets import load_dataset
 from PIL import Image
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
 from src.runtime import load_config
 
 

@@ -13,22 +13,17 @@ import io
 import json
 import os
 import re
-import sys
 import time
 from pathlib import Path
 
 import openai
 from dotenv import load_dotenv
 from PIL import Image
+from loguru import logger
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+from src.runtime import PROJECT_ROOT, append_jsonl, load_config, render
+
 load_dotenv(PROJECT_ROOT / ".env")
-
-sys.path.insert(0, str(PROJECT_ROOT))
-
-from loguru import logger  # noqa: E402
-from src.prompts import render  # noqa: E402
-from src.runtime import append_jsonl, load_config  # noqa: E402
 
 _MEDIA_TYPES: dict[str, str] = {
     ".jpg": "image/jpeg",
@@ -40,6 +35,9 @@ _MEDIA_TYPES: dict[str, str] = {
 
 _OPENAI_SUPPORTED_FORMATS = {"JPEG", "PNG", "WEBP", "GIF"}
 _FINAL_BATCH_STATUSES = {"completed", "failed", "expired", "cancelled"}
+
+_SYSTEM_PROMPT = render("qa_gen_system.j2")
+_INSTRUCTION = render("qa_gen_instruction.j2")
 
 
 def _to_supported_image(image_path: Path) -> tuple[bytes, str]:
@@ -57,10 +55,6 @@ def _to_supported_image(image_path: Path) -> tuple[bytes, str]:
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=85)
     return buf.getvalue(), "image/jpeg"
-
-
-_SYSTEM_PROMPT = render("qa_gen_system.j2")
-_INSTRUCTION = render("qa_gen_instruction.j2")
 
 
 def build_user_message(title: str, caption: str, image_path: Path) -> list[dict]:

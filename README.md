@@ -85,12 +85,7 @@ pretrain_vlm/
 ├── train.py                    # Stage 1 entrypoint
 ├── train_instruction.py        # Stage 2 entrypoint
 ├── config.yaml                 # All training + data configs
-├── prompts/                    # Jinja2 prompt templates
-│   ├── caption_prompt.j2
-│   ├── vqa_system.j2
-│   ├── vqa_question.j2
-│   ├── qa_gen_system.j2
-│   └── qa_gen_instruction.j2
+├── pyproject.toml
 ├── demos/
 │   ├── stage1.py               # Streamlit demo: Stage 1 captioning
 │   ├── instruction.py          # Streamlit demo: Stage 2 instruction chat
@@ -111,43 +106,33 @@ pretrain_vlm/
     ├── modeling.py             # Model & processor construction
     ├── collators.py            # CaptionCollator / InstructionCollator
     ├── data.py                 # ImageCaptionDataset / ImageInstructionDataset
-    ├── prompts.py              # Jinja2 render helper
-    ├── runtime.py              # Seed, logging, samplers, config loading
+    ├── runtime.py              # Seed, logging, samplers, config loading, Jinja2 render
     ├── training.py             # Token-weighted training loop, checkpointing, eval
     ├── inference.py            # Model loading, generation, IO helpers
-    └── metrics.py              # Corpus-level caption and VQA metrics
+    ├── metrics.py              # Corpus-level caption and VQA metrics
+    └── prompts/                # Jinja2 prompt templates
+        ├── caption_prompt.j2
+        ├── vqa_system.j2
+        ├── vqa_question.j2
+        ├── qa_gen_system.j2
+        └── qa_gen_instruction.j2
 ```
 
 ---
 
 ## Setup
 
-<details>
-<summary><strong>Option A — uv (recommended)</strong></summary>
-
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 uv sync
-source .venv/bin/activate
 ```
 
-</details>
-
-<details>
-<summary><strong>Option B — pip</strong></summary>
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-</details>
+`uv sync` installs all dependencies and the `src` package in editable mode. All commands are run via `uv run` — no manual venv activation needed.
 
 **HuggingFace access** — both models require accepting their license and authenticating:
 
 ```bash
-huggingface-cli login
+uv run huggingface-cli login
 ```
 
 ---
@@ -158,17 +143,17 @@ Run scripts in order. All paths are read from `config.yaml`.
 
 ```bash
 # Stage 1 data
-python scripts/prepare_data.py uit
-python scripts/prepare_data.py coco
+uv run python scripts/prepare_data.py uit
+uv run python scripts/prepare_data.py coco
 
 # Stage 2 data
-python scripts/prepare_data.py sharegpt
-python scripts/prepare_data.py 5cd       # optional; requires HF access approval
+uv run python scripts/prepare_data.py sharegpt
+uv run python scripts/prepare_data.py 5cd       # optional; requires HF access approval
 
 # VietnamTourism data (optional)
-python scripts/prepare_data.py vietnamtourism-crawl
-python scripts/prepare_data.py vietnamtourism-qa      # uses OpenAI Batch API
-python scripts/prepare_data.py vietnamtourism-prepare
+uv run python scripts/prepare_data.py vietnamtourism-crawl
+uv run python scripts/prepare_data.py vietnamtourism-qa      # uses OpenAI Batch API
+uv run python scripts/prepare_data.py vietnamtourism-prepare
 ```
 
 Stage 1 expects `image` + `caption` fields. Stage 2 expects `image` + `messages` (OpenAI chat format, must end with an assistant turn).
@@ -181,7 +166,7 @@ Stage 1 expects `image` + `caption` fields. Stage 2 expects `image` + `messages`
 
 ```bash
 # Single GPU
-accelerate launch --num_processes 1 train.py --config-section train
+uv run accelerate launch --num_processes 1 train.py --config-section train
 
 # Multi-GPU (edit CUDA_VISIBLE_DEVICES and NUM_PROCESSES in the script as needed)
 bash scripts/train_stage1.sh
@@ -190,17 +175,17 @@ bash scripts/train_stage1.sh
 NUM_PROCESSES=1 CUDA_VISIBLE_DEVICES=0 bash scripts/train_stage1.sh
 
 # Resume
-accelerate launch train.py --config-section train --resume-from outputs/run1/checkpoint-500
+uv run accelerate launch train.py --config-section train --resume-from outputs/run1/checkpoint-500
 ```
 
 ### Stage 2
 
 ```bash
 # Fresh run (warm-starts projector from stage1_projector_ckpt in config.yaml)
-accelerate launch train_instruction.py
+uv run accelerate launch train_instruction.py
 
 # Resume
-accelerate launch train_instruction.py --resume-from outputs/instruction_run1/checkpoint-1000
+uv run accelerate launch train_instruction.py --resume-from outputs/instruction_run1/checkpoint-1000
 ```
 
 ---
@@ -209,16 +194,16 @@ accelerate launch train_instruction.py --resume-from outputs/instruction_run1/ch
 
 ```bash
 # Download benchmarks first
-python scripts/download_benchmarks.py --output-root data/benchmarks
+uv run python scripts/download_benchmarks.py --output-root data/benchmarks
 
 # Stage 1 — KTVIC captioning benchmark
-python scripts/evaluate.py ktvic \
+uv run python scripts/evaluate.py ktvic \
   --annotations data/benchmarks/ktvic/test.json \
   --image-root data/benchmarks/ktvic/images \
   --checkpoint outputs/stage1/checkpoint-2500
 
 # Stage 2 — Viet Cultural VQA
-python scripts/evaluate.py viet-cultural-vqa \
+uv run python scripts/evaluate.py viet-cultural-vqa \
   --annotations data/benchmarks/viet-cultural-vqa/splits/test_data.json \
   --image-root data/benchmarks/viet-cultural-vqa \
   --checkpoint outputs/instruction_run1/checkpoint-1000
@@ -232,10 +217,10 @@ Run from the project root:
 
 ```bash
 # Stage 1 projector demo (captioning + projector scale diagnostics)
-streamlit run demos/stage1.py
+uv run streamlit run demos/stage1.py
 
 # Stage 2 instruction demo (multi-turn chat)
-streamlit run demos/instruction.py
+uv run streamlit run demos/instruction.py
 ```
 
 Select checkpoint, device, and generation parameters in the sidebar. Both demos load eval samples automatically if the configured JSONL paths exist.

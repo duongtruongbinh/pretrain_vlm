@@ -6,16 +6,30 @@ import hashlib
 import json
 import os
 import random
+from functools import lru_cache
 from pathlib import Path
 
 import torch
 import yaml
+from jinja2 import Environment, FileSystemLoader, StrictUndefined
 from loguru import logger
 from torch.utils.data import Sampler, WeightedRandomSampler
 from tqdm.auto import tqdm
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = PROJECT_ROOT / "config.yaml"
+
+
+@lru_cache(maxsize=None)
+def _jinja_env() -> Environment:
+    return Environment(
+        loader=FileSystemLoader(str(Path(__file__).parent / "prompts")),
+        undefined=StrictUndefined,
+    )
+
+
+def render(template_name: str, **kwargs: object) -> str:
+    return _jinja_env().get_template(template_name).render(**kwargs)
 
 
 def load_config(section_name: str) -> dict:

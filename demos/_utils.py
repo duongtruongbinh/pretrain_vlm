@@ -6,14 +6,7 @@ from pathlib import Path
 
 import yaml
 
-
-def eos_token_ids(tokenizer) -> list[int]:
-    ids = {tokenizer.eos_token_id}
-    for token in ("<|eot_id|>", "<|end_of_text|>"):
-        token_id = tokenizer.convert_tokens_to_ids(token)
-        if isinstance(token_id, int) and token_id >= 0:
-            ids.add(token_id)
-    return sorted(i for i in ids if i is not None)
+from src.inference import eos_token_ids
 
 
 def detect_devices() -> list[str]:

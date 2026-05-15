@@ -9,16 +9,12 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from collections import OrderedDict
 from pathlib import Path
 
 from tqdm.auto import tqdm
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
-
-from src.inference import (  # noqa: E402
+from src.inference import (
     DEFAULT_SYSTEM_PROMPT,
     generate_answer,
     generate_caption,
@@ -28,8 +24,8 @@ from src.inference import (  # noqa: E402
     write_json,
     write_jsonl,
 )
-from src.metrics import caption_metrics, summarize_vqa_scores  # noqa: E402
-from src.prompts import render  # noqa: E402
+from src.metrics import caption_metrics, summarize_vqa_scores
+from src.runtime import render
 
 
 # ---------------------------------------------------------------------------

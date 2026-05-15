@@ -7,7 +7,7 @@ import warnings
 import torch
 
 from src.modeling import IMAGE_TOKEN, build_processor
-from src.prompts import render
+from src.runtime import render
 
 PROMPT_TEMPLATE = render("caption_prompt.j2")
 

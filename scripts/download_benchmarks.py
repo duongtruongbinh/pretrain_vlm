@@ -13,8 +13,8 @@ from pathlib import Path
 from huggingface_hub import hf_hub_download
 from tqdm.auto import tqdm
 
+from src.runtime import PROJECT_ROOT
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "data" / "benchmarks"
 DEFAULT_KTVIC_DATASET = "leo040802/ktvic-dataset"
 DEFAULT_VIET_CULTURAL_DATASET = "Dangindev/viet-cultural-vqa"

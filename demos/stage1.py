@@ -13,13 +13,13 @@ from _utils import (
     load_checkpoint_config, merge_checkpoint_config, read_checkpoint_pointer,
 )
 
+from src.runtime import PROJECT_ROOT
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "stage_1_projector_coco_uit_final"
 
 
 def _load_default_prompt() -> str:
-    from src.prompts import render
+    from src.runtime import render
     return render("caption_prompt.j2")
 
 

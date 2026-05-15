@@ -13,45 +13,40 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import sys
-from pathlib import Path
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
 
 
 def cmd_uit(_args: argparse.Namespace) -> None:
-    from scripts.prepare_uit_openviic import main
+    from prepare_uit_openviic import main
     main()
 
 
 def cmd_coco(args: argparse.Namespace) -> None:
-    from scripts.prepare_coco_data import run
+    from prepare_coco_data import run
     run(args)
 
 
 def cmd_sharegpt(args: argparse.Namespace) -> None:
-    from scripts.prepare_instruction_common import run
+    from prepare_instruction_common import run
     run(args.config_section)
 
 
 def cmd_5cd(args: argparse.Namespace) -> None:
-    from scripts.prepare_instruction_common import run
+    from prepare_instruction_common import run
     run(args.config_section)
 
 
 def cmd_vietnamtourism_crawl(_args: argparse.Namespace) -> None:
-    from scripts.crawl_vietnamtourism import main
+    from crawl_vietnamtourism import main
     main()
 
 
 def cmd_vietnamtourism_qa(_args: argparse.Namespace) -> None:
-    from scripts.generate_qa_vietnamtourism import main
+    from generate_qa_vietnamtourism import main
     main()
 
 
 def cmd_vietnamtourism_prepare(_args: argparse.Namespace) -> None:
-    from scripts.prepare_vietnamtourism_data import main
+    from prepare_vietnamtourism_data import main
     main()
 
 

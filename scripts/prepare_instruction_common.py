@@ -5,11 +5,8 @@ import hashlib
 import json
 import re
 import shutil
-import sys
 from collections import Counter, defaultdict
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from datasets import Image as HfImage
 from datasets import load_dataset

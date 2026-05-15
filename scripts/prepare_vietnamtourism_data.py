@@ -3,11 +3,8 @@
 from __future__ import annotations
 
 import json
-import sys
 from collections import Counter, defaultdict
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from loguru import logger
 from src.runtime import hash_split, load_config
