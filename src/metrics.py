@@ -33,11 +33,6 @@ def as_references(references: str | Iterable[str]) -> list[str]:
     return [ref for ref in refs if normalize_text(ref)]
 
 
-def exact_match(prediction: str, references: str | Iterable[str]) -> float:
-    pred = normalize_text(prediction)
-    return 1.0 if any(pred == normalize_text(ref) for ref in as_references(references)) else 0.0
-
-
 def token_f1(prediction: str, references: str | Iterable[str]) -> float:
     pred_tokens = tokenize(prediction)
     if not pred_tokens:
@@ -45,31 +40,21 @@ def token_f1(prediction: str, references: str | Iterable[str]) -> float:
     return max((_token_f1_single(pred_tokens, tokenize(ref)) for ref in as_references(references)), default=0.0)
 
 
-def anls(prediction: str, references: str | Iterable[str], threshold: float = 0.5) -> float:
-    pred = normalize_text(prediction)
-    if not pred:
+def rouge_l(prediction: str, references: str | Iterable[str]) -> float:
+    pred_tokens = tokenize(prediction)
+    if not pred_tokens:
         return 0.0
-    scores = []
-    for ref in as_references(references):
-        ref_norm = normalize_text(ref)
-        max_len = max(len(pred), len(ref_norm))
-        if max_len == 0:
-            scores.append(1.0)
-            continue
-        score = 1.0 - (_levenshtein(pred, ref_norm) / max_len)
-        scores.append(score if score >= threshold else 0.0)
-    return max(scores, default=0.0)
+    return max((_rouge_l_single(pred_tokens, tokenize(ref)) for ref in as_references(references)), default=0.0)
 
 
-def summarize_vqa_scores(rows: Iterable[dict]) -> dict[str, float]:
-    totals = {"exact_match": 0.0, "token_f1": 0.0, "anls": 0.0}
+def summarize_instruction_scores(rows: Iterable[dict]) -> dict[str, float]:
+    totals = {"token_f1": 0.0, "rouge_l": 0.0}
     count = 0
     for row in rows:
         prediction = str(row.get("prediction", ""))
         refs = as_references(row.get("references", []))
-        totals["exact_match"] += exact_match(prediction, refs)
         totals["token_f1"] += token_f1(prediction, refs)
-        totals["anls"] += anls(prediction, refs)
+        totals["rouge_l"] += rouge_l(prediction, refs)
         count += 1
     if count == 0:
         return {"count": 0, **totals}
@@ -110,19 +95,26 @@ def _token_f1_single(pred_tokens: list[str], ref_tokens: list[str]) -> float:
     return 2 * precision * recall / (precision + recall)
 
 
-def _levenshtein(left: str, right: str) -> int:
-    if left == right:
-        return 0
-    if len(left) < len(right):
-        left, right = right, left
-    previous = list(range(len(right) + 1))
-    for i, left_char in enumerate(left, start=1):
-        current = [i]
-        for j, right_char in enumerate(right, start=1):
-            insert = current[j - 1] + 1
-            delete = previous[j] + 1
-            replace = previous[j - 1] + (left_char != right_char)
-            current.append(min(insert, delete, replace))
+def _rouge_l_single(pred_tokens: list[str], ref_tokens: list[str]) -> float:
+    if not ref_tokens:
+        return 0.0
+    overlap = _lcs_length(pred_tokens, ref_tokens)
+    if overlap == 0:
+        return 0.0
+    precision = overlap / len(pred_tokens)
+    recall = overlap / len(ref_tokens)
+    return 2 * precision * recall / (precision + recall)
+
+
+def _lcs_length(left: list[str], right: list[str]) -> int:
+    previous = [0] * (len(right) + 1)
+    for left_token in left:
+        current = [0]
+        for j, right_token in enumerate(right, start=1):
+            if left_token == right_token:
+                current.append(previous[j - 1] + 1)
+            else:
+                current.append(max(previous[j], current[j - 1]))
         previous = current
     return previous[-1]
 

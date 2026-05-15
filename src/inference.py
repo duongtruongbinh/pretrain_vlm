@@ -212,13 +212,14 @@ def generate_answer(
     *,
     system_prompt: str,
     max_new_tokens: int,
+    question_text: str | None = None,
 ) -> tuple[str, str]:
     device = next(model.parameters()).device
     vision_dtype = next(model.vision_tower.parameters()).dtype
     tokenizer = collator.tokenizer
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": render("vqa_question.j2", question=question)},
+        {"role": "user", "content": question_text or render("vqa_question.j2", question=question)},
     ]
     input_ids, attention_mask, pixel_values = collator.build_prompt_tensors(
         messages, image.convert("RGB"), device=device

@@ -93,7 +93,7 @@ pretrain_vlm/
 ├── scripts/
 │   ├── prepare_data.py         # Data prep entrypoint (subcommands per dataset)
 │   ├── evaluate.py             # Benchmark eval entrypoint (subcommands per task)
-│   ├── download_benchmarks.py  # Download KTVIC + Viet Cultural VQA datasets
+│   ├── download_benchmarks.py  # Download KTVIC + Vista conversation datasets
 │   ├── prepare_uit_openviic.py
 │   ├── prepare_coco_data.py
 │   ├── prepare_instruction_common.py
@@ -198,14 +198,14 @@ uv run python scripts/download_benchmarks.py --output-root data/benchmarks
 
 # Stage 1 — KTVIC captioning benchmark
 uv run python scripts/evaluate.py ktvic \
-  --annotations data/benchmarks/ktvic/test.json \
-  --image-root data/benchmarks/ktvic/images \
+  --annotations data/benchmarks/ktvic/raw/ktvic_dataset/test_data.json \
+  --image-root data/benchmarks/ktvic/raw/ktvic_dataset/public-test-images \
   --checkpoint outputs/stage1/checkpoint-2500
 
-# Stage 2 — Viet Cultural VQA
-uv run python scripts/evaluate.py viet-cultural-vqa \
-  --annotations data/benchmarks/viet-cultural-vqa/splits/test_data.json \
-  --image-root data/benchmarks/viet-cultural-vqa \
+# Stage 2 — Vista conversation
+uv run python scripts/evaluate.py vista-conversation \
+  --annotations data/benchmarks/vista/data/vi_llava_conversation/validation-00000-of-00001.parquet \
+  --image-root data/benchmarks/vista/images/coco2017/val2017 \
   --checkpoint outputs/instruction_run1/checkpoint-1000
 ```
 

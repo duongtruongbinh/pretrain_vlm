@@ -1,44 +1,42 @@
-"""Download benchmark datasets used by the local evaluation scripts."""
+"""Download KTVIC and Vista conversation benchmark data."""
 
 from __future__ import annotations
 
 import argparse
-import json
 import shlex
 import shutil
 import subprocess
 import sys
+import urllib.parse
+import urllib.request
+import zipfile
 from pathlib import Path
 
-from huggingface_hub import hf_hub_download
-from tqdm.auto import tqdm
 
-from src.runtime import PROJECT_ROOT
-
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "data" / "benchmarks"
 DEFAULT_KTVIC_DATASET = "leo040802/ktvic-dataset"
-DEFAULT_VIET_CULTURAL_DATASET = "Dangindev/viet-cultural-vqa"
+DEFAULT_VISTA_DATASET = "Vi-VLM/Vista"
+DEFAULT_VISTA_CONFIG = "vi_llava_conversation"
+DEFAULT_VISTA_SPLIT = "validation"
+DEFAULT_COCO_VAL2017_URL = "http://images.cocodataset.org/zips/val2017.zip"
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Download KTVIC and Viet Cultural VQA benchmark data.")
+    parser = argparse.ArgumentParser(description="Download KTVIC and Vista conversation benchmark data.")
     parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
     parser.add_argument("--ktvic-kaggle-dataset", default=DEFAULT_KTVIC_DATASET)
-    parser.add_argument("--viet-cultural-dataset", default=DEFAULT_VIET_CULTURAL_DATASET)
-    parser.add_argument("--viet-cultural-split", default="test", choices=("train", "val", "validation", "test"))
+    parser.add_argument("--vista-dataset", default=DEFAULT_VISTA_DATASET)
+    parser.add_argument("--vista-config", default=DEFAULT_VISTA_CONFIG)
+    parser.add_argument("--vista-split", default=DEFAULT_VISTA_SPLIT)
+    parser.add_argument("--vista-image-root", default=None)
+    parser.add_argument("--coco-val2017-url", default=DEFAULT_COCO_VAL2017_URL)
     parser.add_argument("--skip-ktvic", action="store_true")
-    parser.add_argument("--skip-viet-cultural-vqa", action="store_true")
-    parser.add_argument("--skip-viet-cultural-images", action="store_true")
+    parser.add_argument("--skip-vista", action="store_true")
+    parser.add_argument("--skip-vista-images", action="store_true")
+    parser.add_argument("--force-vista-images", action="store_true")
     parser.add_argument("--env-file", default=None)
     return parser.parse_args()
-
-
-def normalize_viet_cultural_repo_image_path(image_path: str) -> str:
-    path = Path(str(image_path).strip())
-    parts = path.parts
-    if parts[:2] == ("data", "images"):
-        path = Path(*parts[1:])
-    return path.as_posix()
 
 
 def find_ktvic_test_annotation(root: Path) -> Path | None:
@@ -63,6 +61,15 @@ def find_image_root(root: Path) -> Path:
                 image_dirs.append((image_count, directory))
     if not image_dirs:
         return root
+
+    test_images = [
+        item
+        for item in image_dirs
+        if item[1].name.casefold() in {"public-test-images", "public_test_images", "test-images", "test_images"}
+    ]
+    if test_images:
+        return sorted(test_images, key=lambda item: (-item[0], len(item[1].parts)))[0][1]
+
     named_images = [item for item in image_dirs if item[1].name.casefold() in {"image", "images", "imgs"}]
     pool = named_images or image_dirs
     return sorted(pool, key=lambda item: (-item[0], len(item[1].parts)))[0][1]
@@ -92,58 +99,123 @@ def download_ktvic(output_root: Path, dataset_slug: str) -> dict[str, Path]:
     annotation_path = find_ktvic_test_annotation(raw_dir)
     if not annotation_path:
         raise RuntimeError(f"Không tìm thấy file annotation test trong {raw_dir}.")
-    image_root = find_image_root(raw_dir)
     return {
         "KTVIC_ANNOTATIONS": annotation_path.resolve(),
-        "KTVIC_IMAGE_ROOT": image_root.resolve(),
+        "KTVIC_IMAGE_ROOT": find_image_root(raw_dir).resolve(),
     }
 
 
-def download_viet_cultural_vqa(
+def existing_ktvic_paths(output_root: Path) -> dict[str, Path]:
+    raw_dir = output_root / "ktvic" / "raw"
+    if not raw_dir.exists():
+        return {}
+    annotation_path = find_ktvic_test_annotation(raw_dir)
+    if not annotation_path:
+        return {}
+    return {
+        "KTVIC_ANNOTATIONS": annotation_path.resolve(),
+        "KTVIC_IMAGE_ROOT": find_image_root(raw_dir).resolve(),
+    }
+
+
+def vista_conversation_filename(config: str, split: str) -> str:
+    return f"data/{config}/{split}-00000-of-00001.parquet"
+
+
+def vista_conversation_annotation_path(output_root: str | Path, config: str, split: str) -> Path:
+    return Path(output_root).expanduser().resolve() / "vista" / vista_conversation_filename(config, split)
+
+
+def vista_conversation_image_root(output_root: str | Path) -> Path:
+    return Path(output_root).expanduser().resolve() / "vista" / "images" / "coco2017" / "val2017"
+
+
+def coco_val2017_zip_path(output_root: str | Path) -> Path:
+    return Path(output_root).expanduser().resolve() / "vista" / "images" / "coco2017" / "val2017.zip"
+
+
+def download_file(url: str, destination: Path, force: bool = False) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists() and not force:
+        print(f"[download] skip existing file: {destination}")
+        return
+
+    print(f"[download] downloading {url}")
+    try:
+        subprocess.run(["wget", "-c", "-O", str(destination), url], check=True)
+    except FileNotFoundError:
+        urllib.request.urlretrieve(url, destination)
+
+
+def download_zip_file(url: str, destination: Path, force: bool) -> None:
+    download_file(url, destination, force)
+    if zipfile.is_zipfile(destination):
+        return
+    print(f"[download] invalid zip file, redownloading: {destination}")
+    destination.unlink(missing_ok=True)
+    download_file(url, destination, force=True)
+    if not zipfile.is_zipfile(destination):
+        raise RuntimeError(f"Downloaded file is not a valid zip archive: {destination}")
+
+
+def hf_dataset_url(repo_id: str, filename: str) -> str:
+    quoted_filename = urllib.parse.quote(filename)
+    return f"https://huggingface.co/datasets/{repo_id}/resolve/main/{quoted_filename}?download=true"
+
+
+def extract_coco_val2017(archive_path: Path, target: Path, force: bool) -> None:
+    if target.exists() and not force:
+        print(f"[download] skip existing Vista images: {target}")
+        return
+
+    extract_root = target.parent
+    extracted = extract_root / "val2017"
+    if target.exists() and force:
+        shutil.rmtree(target)
+    print(f"[download] extracting {archive_path}")
+    with zipfile.ZipFile(archive_path) as archive:
+        archive.extractall(extract_root)
+
+    if extracted != target:
+        shutil.move(str(extracted), str(target))
+
+
+def download_vista_conversation(
     output_root: Path,
     dataset_id: str,
+    config: str,
     split: str,
+    image_root: str | None,
+    coco_val2017_url: str,
     *,
     download_images: bool,
+    force_images: bool,
 ) -> dict[str, Path]:
-    split_name = "val" if split == "validation" else split
-    split_file = f"splits/{split_name}_data.json"
-    dataset_dir = output_root / "viet-cultural-vqa"
-    annotation_path = Path(
-        hf_hub_download(
-            repo_id=dataset_id,
-            repo_type="dataset",
-            filename=split_file,
-            local_dir=dataset_dir,
-        )
-    )
-
-    if download_images:
-        image_paths = _viet_cultural_image_paths(annotation_path)
-        for image_path in tqdm(image_paths, desc="viet-cultural-vqa images", dynamic_ncols=True):
-            hf_hub_download(
-                repo_id=dataset_id,
-                repo_type="dataset",
-                filename=image_path,
-                local_dir=dataset_dir,
-            )
-
+    annotation_path = vista_conversation_annotation_path(output_root, config, split)
+    download_file(hf_dataset_url(dataset_id, vista_conversation_filename(config, split)), annotation_path)
+    if image_root:
+        resolved_image_root = Path(image_root).expanduser().resolve()
+    else:
+        resolved_image_root = vista_conversation_image_root(output_root)
+        if download_images:
+            archive_path = coco_val2017_zip_path(output_root)
+            download_zip_file(coco_val2017_url, archive_path, force_images)
+            extract_coco_val2017(archive_path, resolved_image_root, force_images)
     return {
-        "VIET_CULTURAL_VQA_ANNOTATIONS": annotation_path.resolve(),
-        "VIET_CULTURAL_VQA_IMAGE_ROOT": dataset_dir.resolve(),
+        "VISTA_CONVERSATION_ANNOTATIONS": annotation_path.resolve(),
+        "VISTA_CONVERSATION_IMAGE_ROOT": resolved_image_root,
     }
 
 
-def _viet_cultural_image_paths(annotation_path: Path) -> list[str]:
-    payload = json.loads(annotation_path.read_text(encoding="utf-8"))
-    if not isinstance(payload, list):
-        raise ValueError("Viet Cultural VQA split file must be a JSON list.")
-    paths = {
-        normalize_viet_cultural_repo_image_path(item.get("image_path", ""))
-        for item in payload
-        if isinstance(item, dict) and item.get("image_path")
+def existing_vista_conversation_paths(output_root: Path, config: str, split: str) -> dict[str, Path]:
+    annotation_path = vista_conversation_annotation_path(output_root, config, split)
+    image_root = vista_conversation_image_root(output_root)
+    if not annotation_path.exists() or not image_root.exists():
+        return {}
+    return {
+        "VISTA_CONVERSATION_ANNOTATIONS": annotation_path.resolve(),
+        "VISTA_CONVERSATION_IMAGE_ROOT": image_root.resolve(),
     }
-    return sorted(path for path in paths if path)
 
 
 def _ktvic_annotation_rank(path: Path) -> tuple[int, int, str]:
@@ -162,15 +234,24 @@ def main() -> None:
     output_root.mkdir(parents=True, exist_ok=True)
     env_values: dict[str, Path] = {}
 
-    if not args.skip_ktvic:
+    if args.skip_ktvic:
+        env_values.update(existing_ktvic_paths(output_root))
+    else:
         env_values.update(download_ktvic(output_root, args.ktvic_kaggle_dataset))
-    if not args.skip_viet_cultural_vqa:
+
+    if args.skip_vista:
+        env_values.update(existing_vista_conversation_paths(output_root, args.vista_config, args.vista_split))
+    else:
         env_values.update(
-            download_viet_cultural_vqa(
+            download_vista_conversation(
                 output_root,
-                args.viet_cultural_dataset,
-                args.viet_cultural_split,
-                download_images=not args.skip_viet_cultural_images,
+                args.vista_dataset,
+                args.vista_config,
+                args.vista_split,
+                args.vista_image_root,
+                args.coco_val2017_url,
+                download_images=not args.skip_vista_images,
+                force_images=args.force_vista_images,
             )
         )
 
