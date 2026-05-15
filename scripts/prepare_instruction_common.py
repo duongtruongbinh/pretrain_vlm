@@ -16,7 +16,7 @@ from datasets import load_dataset
 from loguru import logger
 from PIL import Image
 
-from src.runtime import load_config
+from src.runtime import hash_split, load_config
 
 
 IMAGE_FIELD_CANDIDATES = ("image", "Image", "img")
@@ -103,34 +103,18 @@ def normalize_qna_messages(raw_messages) -> list[dict[str, str]]:
     return normalized_messages
 
 
-def stable_split_for_image(image_key: str, seed: int, val_ratio: float, test_ratio: float) -> str:
-    digest = hashlib.sha1(f"{seed}:{image_key}".encode("utf-8")).hexdigest()
-    score = int(digest[:8], 16) / 0xFFFFFFFF
-    if score < float(test_ratio):
-        return "test"
-    if score < float(test_ratio) + float(val_ratio):
-        return "val"
-    return "train"
-
-
 def determine_output_split(
     raw_split: str, *, split_mode: str, image_key: str, seed: int, val_ratio: float, test_ratio: float
 ) -> str:
     normalized_mode = str(split_mode).strip().lower()
-    normalized_raw_split = SPLIT_NAME_MAP.get(str(raw_split).strip().lower())
-
     if normalized_mode == "source":
-        if normalized_raw_split is None:
+        normalized = SPLIT_NAME_MAP.get(str(raw_split).strip().lower())
+        if normalized is None:
             raise ValueError(f"Source split '{raw_split}' cannot be mapped to train/val/test.")
-        return normalized_raw_split
-
-    if normalized_mode == "image_level":
-        return stable_split_for_image(image_key, seed=seed, val_ratio=val_ratio, test_ratio=test_ratio)
-
-    if normalized_mode != "auto":
+        return normalized
+    if normalized_mode not in {"auto", "image_level"}:
         raise ValueError(f"Unsupported split_mode '{split_mode}'.")
-
-    return stable_split_for_image(image_key, seed=seed, val_ratio=val_ratio, test_ratio=test_ratio)
+    return hash_split(image_key, seed=seed, val_ratio=val_ratio, test_ratio=test_ratio)
 
 
 def infer_image_key(row: dict, image_field: str, row_index: int, raw_split: str) -> str:
@@ -204,7 +188,7 @@ def build_description_sample(
 ) -> dict:
     return {
         "id": sample_id,
-        "image": str(image_path.resolve()),
+        "image": str(image_path),
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -228,7 +212,7 @@ def build_qna_samples(
     return [
         {
             "id": f"{sample_id_prefix}_qa",
-            "image": str(image_path.resolve()),
+            "image": str(image_path),
             "messages": [{"role": "system", "content": system_prompt}, *qna_messages],
             "sample_type": "qa",
             "source_dataset": source_dataset,

@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import json
-import re
 from contextlib import nullcontext
 from pathlib import Path
 
 from PIL import Image
 import streamlit as st
-import yaml
 
-from _utils import default_device_index, detect_devices, device_label, eos_token_ids
+from _utils import (
+    checkpoint_step, default_checkpoint_index, default_device_index,
+    detect_devices, device_label, eos_token_ids,
+    load_checkpoint_config, merge_checkpoint_config, read_checkpoint_pointer,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -26,11 +28,6 @@ DEFAULT_PROMPT = _load_default_prompt()
 st.set_page_config(page_title="Stage 1 Projector Test", layout="wide")
 
 
-def checkpoint_step(path: Path) -> int:
-    match = re.search(r"checkpoint-(\d+)(?:\.pt)?$", path.name)
-    return int(match.group(1)) if match else -1
-
-
 def _is_checkpoint(path: Path) -> bool:
     if not path.name.startswith("checkpoint-"):
         return False
@@ -42,55 +39,7 @@ def _is_checkpoint(path: Path) -> bool:
 def find_checkpoints(output_dir: Path) -> list[Path]:
     if not output_dir.exists():
         return []
-    checkpoints = [p for p in output_dir.iterdir() if _is_checkpoint(p)]
-    return sorted(checkpoints, key=checkpoint_step, reverse=True)
-
-
-def read_checkpoint_pointer(output_dir: Path, name: str) -> Path | None:
-    pointer_path = output_dir / f"{name}_checkpoint.json"
-    if not pointer_path.exists():
-        return None
-    try:
-        with pointer_path.open("r", encoding="utf-8") as handle:
-            payload = json.load(handle)
-        checkpoint = Path(str(payload["checkpoint"])).expanduser()
-        if not checkpoint.is_absolute():
-            checkpoint = output_dir / checkpoint
-        checkpoint = checkpoint.resolve()
-        return checkpoint if _is_checkpoint(checkpoint) else None
-    except Exception:
-        return None
-
-
-def default_checkpoint_index(output_dir: Path, checkpoints: list[Path]) -> int:
-    resolved = [path.resolve() for path in checkpoints]
-    for pointer_name in ("best", "last"):
-        pointer = read_checkpoint_pointer(output_dir, pointer_name)
-        if pointer and pointer.resolve() in resolved:
-            return resolved.index(pointer.resolve())
-    return 0
-
-
-def load_checkpoint_training_config(checkpoint_path: Path) -> dict:
-    config_path = checkpoint_path / "training_config.yaml" if checkpoint_path.is_dir() else None
-    if not config_path or not config_path.exists():
-        return {}
-    with config_path.open("r", encoding="utf-8") as handle:
-        config = yaml.safe_load(handle) or {}
-    if not isinstance(config, dict):
-        raise TypeError(f"{config_path} must contain a mapping.")
-    return config
-
-
-def merge_checkpoint_config(base_config: dict, checkpoint_path: Path) -> dict:
-    merged = dict(base_config)
-    merged.update(load_checkpoint_training_config(checkpoint_path))
-    return merged
-
-
-def resolve_tokenizer_source(checkpoint_path: str | Path, fallback_llm_model: str) -> str:
-    tokenizer_dir = Path(checkpoint_path).expanduser().resolve() / "tokenizer"
-    return str(tokenizer_dir) if tokenizer_dir.exists() else fallback_llm_model
+    return sorted([p for p in output_dir.iterdir() if _is_checkpoint(p)], key=checkpoint_step, reverse=True)
 
 
 @st.cache_data(show_spinner=False)
@@ -143,11 +92,12 @@ def load_model_resource(
 ):
     import torch
 
+    from src.inference import resolve_stage1_tokenizer
     from src.modeling import build_model, build_processor
     from src.training import load_projector_checkpoint
 
     device = torch.device(device_name)
-    tokenizer_source = resolve_tokenizer_source(checkpoint_path, llm_model)
+    tokenizer_source = resolve_stage1_tokenizer(checkpoint_path, llm_model)
     processor = build_processor(vision_model, tokenizer_source)
     model = build_model(
         vision_model,

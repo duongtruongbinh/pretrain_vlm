@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import json
-import re
 from contextlib import nullcontext
 from pathlib import Path
 
 from PIL import Image
 import streamlit as st
-import yaml
 
-from _utils import default_device_index, detect_devices, device_label, eos_token_ids
+from _utils import (
+    checkpoint_step, default_checkpoint_index, default_device_index,
+    detect_devices, device_label, eos_token_ids,
+    load_checkpoint_config, merge_checkpoint_config, read_checkpoint_pointer,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -26,11 +28,6 @@ DEFAULT_SYSTEM_PROMPT = _load_default_system_prompt()
 st.set_page_config(page_title="Instruction Model Test", layout="wide")
 
 
-def checkpoint_step(path: Path) -> int:
-    match = re.search(r"checkpoint-(\d+)$", path.name)
-    return int(match.group(1)) if match else -1
-
-
 def _is_checkpoint(path: Path) -> bool:
     return path.is_dir() and path.name.startswith("checkpoint-") and (path / "projector.pt").exists()
 
@@ -39,43 +36,6 @@ def find_checkpoints(output_dir: Path) -> list[Path]:
     if not output_dir.exists():
         return []
     return sorted([p for p in output_dir.iterdir() if _is_checkpoint(p)], key=checkpoint_step, reverse=True)
-
-
-def read_checkpoint_pointer(output_dir: Path, name: str) -> Path | None:
-    pointer_path = output_dir / f"{name}_checkpoint.json"
-    if not pointer_path.exists():
-        return None
-    try:
-        with pointer_path.open("r", encoding="utf-8") as fh:
-            payload = json.load(fh)
-        ckpt = Path(str(payload["checkpoint"])).expanduser().resolve()
-        return ckpt if _is_checkpoint(ckpt) else None
-    except Exception:
-        return None
-
-
-def default_checkpoint_index(output_dir: Path, checkpoints: list[Path]) -> int:
-    resolved = [p.resolve() for p in checkpoints]
-    for name in ("best", "last"):
-        ptr = read_checkpoint_pointer(output_dir, name)
-        if ptr and ptr.resolve() in resolved:
-            return resolved.index(ptr.resolve())
-    return 0
-
-
-def load_checkpoint_config(checkpoint_path: Path) -> dict:
-    cfg_path = checkpoint_path / "training_config.yaml"
-    if not cfg_path.exists():
-        return {}
-    with cfg_path.open("r", encoding="utf-8") as fh:
-        cfg = yaml.safe_load(fh) or {}
-    return cfg if isinstance(cfg, dict) else {}
-
-
-def merge_config(base: dict, checkpoint_path: Path) -> dict:
-    merged = dict(base)
-    merged.update(load_checkpoint_config(checkpoint_path))
-    return merged
 
 
 def resolve_checkpoint_sources(checkpoint_path: str | Path, fallback_llm_model: str) -> tuple[str, str]:
@@ -247,7 +207,7 @@ def main() -> None:
             index=default_checkpoint_index(output_dir, checkpoints),
             format_func=lambda p: f"{p.name} (step {checkpoint_step(p)})",
         )
-        effective_cfg = merge_config(cfg, checkpoint)
+        effective_cfg = merge_checkpoint_config(cfg, checkpoint)
 
         st.header("Model")
         vision_model = st.text_input("Vision model", value=str(effective_cfg.get("vision_model", "")))

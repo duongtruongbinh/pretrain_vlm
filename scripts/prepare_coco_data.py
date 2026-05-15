@@ -117,7 +117,7 @@ def prepare_split(config: dict, hf_split: str, local_split: str, output_dir: Pat
 
             json.dump(
                 {
-                    "image": str(image_path.resolve()),
+                    "image": str(image_path),
                     "caption": caption,
                     "source_dataset": dataset_name,
                     "source_split": hf_split,

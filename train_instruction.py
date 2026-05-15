@@ -20,7 +20,6 @@ from src.runtime import (
     build_weighted_sampler,
     current_lr,
     load_config,
-    resolve_config_path,
     set_seed,
     setup_logger,
 )
@@ -117,8 +116,8 @@ def _resolve_resume_sources(resume_dir: Path | None, base_llm_model: str) -> tup
     if not llm_dir.exists():
         raise FileNotFoundError(f"Missing resumed LLM weights under {llm_dir}")
 
-    tokenizer_source = str(tokenizer_dir.resolve()) if tokenizer_dir.exists() else base_llm_model
-    return str(llm_dir.resolve()), tokenizer_source
+    tokenizer_source = str(tokenizer_dir) if tokenizer_dir.exists() else base_llm_model
+    return str(llm_dir), tokenizer_source
 
 
 def _log_eval_samples(model, collator, eval_samples, accelerator, max_new_tokens):
@@ -179,14 +178,8 @@ def main() -> None:
     collator = InstructionCollator(
         cfg["vision_model"], tokenizer_source, max_text_tokens=int(cfg["max_text_tokens"])
     )
-    train_jsonl = cfg["train_jsonl"]
-    eval_jsonl = cfg["eval_jsonl"]
-    train_dataset = ImageInstructionDataset(
-        [resolve_config_path(p) for p in train_jsonl] if isinstance(train_jsonl, list) else resolve_config_path(train_jsonl)
-    )
-    eval_dataset = ImageInstructionDataset(
-        [resolve_config_path(p) for p in eval_jsonl] if isinstance(eval_jsonl, list) else resolve_config_path(eval_jsonl)
-    )
+    train_dataset = ImageInstructionDataset(cfg["train_jsonl"])
+    eval_dataset = ImageInstructionDataset(cfg["eval_jsonl"])
     eval_samples = _select_eval_samples(eval_dataset.records)
     sample_weights = cfg.get("sample_weights")
     if sample_weights is not None:

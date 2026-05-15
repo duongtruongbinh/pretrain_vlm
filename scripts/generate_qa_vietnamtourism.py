@@ -196,15 +196,10 @@ def parse_qa_response(content: str) -> tuple[str, list[dict[str, str]]]:
 
 
 def read_done_image_ids(batch_results: Path) -> set[str]:
-    done_ids: set[str] = set()
     if not batch_results.exists():
-        return done_ids
+        return set()
     with batch_results.open(encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if line:
-                done_ids.add(str(json.loads(line)["image_id"]))
-    return done_ids
+        return {str(json.loads(line)["image_id"]) for line in fh if line.strip()}
 
 
 def save_batch_result_text(
@@ -282,10 +277,6 @@ def save_completed_batch(
 _REASONING_MODELS = {"o1", "o3", "o4"}
 
 
-def _is_reasoning_model(model: str) -> bool:
-    return any(model.startswith(prefix) for prefix in _REASONING_MODELS)
-
-
 def build_batch_request(record: dict, *, model: str, max_tokens: int) -> dict:
     image_path = Path(record["image_path"])
     body: dict = {
@@ -301,7 +292,7 @@ def build_batch_request(record: dict, *, model: str, max_tokens: int) -> dict:
             },
         ],
     }
-    if _is_reasoning_model(model):
+    if any(model.startswith(p) for p in _REASONING_MODELS):
         body["reasoning_effort"] = "medium"
     return {
         "custom_id": f"img-{record['image_id']}",
@@ -333,9 +324,7 @@ def main() -> None:
     model = str(cfg.get("model", "gpt-4o"))
     max_tokens = int(cfg.get("max_tokens", 1500))
     max_active_batches = max(1, int(cfg.get("max_active_batches", 3)))
-    max_images = cfg.get("max_images")
-    if max_images is not None:
-        max_images = int(max_images)
+    max_images = int(cfg["max_images"]) if "max_images" in cfg else None
 
     raw_jsonl = raw_dir / "raw_crawl.jsonl"
     batch_results = raw_dir / "batch_results.jsonl"

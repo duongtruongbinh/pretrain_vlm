@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import sys
 from collections import Counter, defaultdict
@@ -11,17 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from loguru import logger
-from src.runtime import load_config
-
-
-def assign_split(image_id: str, seed: int, val_ratio: float, test_ratio: float) -> str:
-    digest = hashlib.sha1(f"{seed}:{image_id}".encode()).hexdigest()
-    score = int(digest[:8], 16) / 0xFFFFFFFF
-    if score < test_ratio:
-        return "test"
-    if score < test_ratio + val_ratio:
-        return "val"
-    return "train"
+from src.runtime import hash_split, load_config
 
 
 def normalize_conversation_messages(raw_messages) -> list[dict[str, str]]:

@@ -19,7 +19,6 @@ from src.runtime import (
     build_weighted_sampler,
     current_lr,
     load_config,
-    resolve_config_paths,
     set_seed,
     setup_logger,
 )
@@ -102,8 +101,8 @@ def main() -> None:
     set_seed(int(cfg["seed"]))
 
     collator = CaptionCollator(cfg["vision_model"], cfg["llm_model"])
-    train_dataset = ImageCaptionDataset(resolve_config_paths(cfg["train_jsonl"]))
-    eval_dataset = ImageCaptionDataset(resolve_config_paths(cfg["eval_jsonl"]))
+    train_dataset = ImageCaptionDataset(cfg["train_jsonl"])
+    eval_dataset = ImageCaptionDataset(cfg["eval_jsonl"])
     eval_samples = _select_eval_samples(eval_dataset.records, sample_count=5)
     train_sampler = build_weighted_sampler(train_dataset, seed=int(cfg["seed"]))
 

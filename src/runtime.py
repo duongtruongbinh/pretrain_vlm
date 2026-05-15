@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import random
@@ -35,19 +36,6 @@ def load_config(section_name: str) -> dict:
     return section
 
 
-def resolve_config_path(value: str | Path) -> str:
-    """Resolve a single path-like config value to an absolute string path."""
-
-    return str(Path(value).expanduser().resolve())
-
-
-def resolve_config_paths(value: str | Path | list[str | Path]) -> str | list[str]:
-    """Resolve one or many path-like config values to absolute string paths."""
-
-    if isinstance(value, list):
-        return [resolve_config_path(item) for item in value]
-    return resolve_config_path(value)
-
 
 def resolve_record_image_path(image_value: str | Path, *, jsonl_path: Path) -> str:
     """Resolve an image path stored in a JSONL record."""
@@ -65,8 +53,6 @@ def resolve_record_image_path(image_value: str | Path, *, jsonl_path: Path) -> s
 
 
 def set_seed(seed: int) -> None:
-    """Seed Python and PyTorch RNGs for reproducible runs."""
-
     os.environ["PYTHONHASHSEED"] = str(seed)
     random.seed(seed)
     torch.manual_seed(seed)
@@ -99,8 +85,6 @@ def _tqdm_sink(message) -> None:
 
 
 class EpochShuffleSampler(Sampler[int]):
-    """Shuffle indices deterministically per epoch."""
-
     def __init__(self, dataset, seed: int):
         self.dataset = dataset
         self.seed = seed
@@ -121,11 +105,7 @@ class EpochShuffleSampler(Sampler[int]):
 def build_weighted_sampler(
     dataset, seed: int, source_weights: list[float] | None = None
 ) -> WeightedRandomSampler:
-    """Weighted sampler across multiple source jsonl files.
-
-    source_weights: desired sampling proportion per source (will be normalised).
-    If None, each source contributes equally regardless of size.
-    """
+    """Per-source weighted sampling; None weights = equal proportion across sources."""
     n_sources = len(dataset.jsonl_paths)
     counts = [0] * n_sources
     for src_idx in dataset.source_indices:
@@ -152,15 +132,21 @@ def build_weighted_sampler(
     )
 
 
-def append_jsonl(path: Path, record: dict) -> None:
-    """Append one JSON record to a JSONL file."""
+def hash_split(key: str, seed: int, val_ratio: float, test_ratio: float) -> str:
+    score = int(hashlib.sha1(f"{seed}:{key}".encode()).hexdigest()[:8], 16) / 0xFFFFFFFF
+    if score < test_ratio:
+        return "test"
+    if score < test_ratio + val_ratio:
+        return "val"
+    return "train"
 
+
+def append_jsonl(path: Path, record: dict) -> None:
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 def current_lr(scheduler, optimizer) -> float:
-    """Return current learning rate from scheduler, falling back to optimizer."""
     try:
         return float(scheduler.get_last_lr()[0])
     except Exception:

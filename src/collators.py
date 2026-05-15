@@ -157,7 +157,6 @@ class InstructionCollator:
         labels = torch.full_like(encoded["input_ids"], -100)
 
         for row, sample in enumerate(valid):
-            # Supervise all assistant turns; mask system/user turns.
             for start, end in self._assistant_token_spans(sample["messages"]):
                 end = min(end, seq_len)
                 if start < seq_len:

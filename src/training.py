@@ -398,7 +398,7 @@ def evaluate_loss(model, eval_loader, accelerator) -> float:
     for batch in eval_loader:
         with torch.no_grad(), accelerator.autocast():
             outputs = model(**batch)
-        sup_tokens = (batch["labels"] != -100).sum()
+        sup_tokens = _supervised_tokens(batch)
         stats = torch.stack(
             [outputs.loss.detach().float() * sup_tokens.float(), sup_tokens.float()]
         )
